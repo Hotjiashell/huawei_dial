@@ -1,0 +1,44 @@
+{
+  "aliases": {
+    "clarq_cases": {}
+  },
+  "settings": {
+    "number_of_shards": 1,
+    "number_of_replicas": 0,
+    "refresh_interval": "-1"
+  },
+  "mappings": {
+    "dynamic": "strict",
+    "properties": {
+      "case_id": {
+        "type": "keyword"
+      },
+      "title": {
+        "type": "text"
+      },
+      "answer": {
+        "type": "text"
+      },
+      "title_vector": {
+        "type": "dense_vector",
+        "dims": 1024,
+        "element_type": "float",
+        "index": true,
+        "similarity": "cosine",
+        "index_options": {
+          "type": "flat"
+        }
+      },
+      "answer_vector": {
+        "type": "dense_vector",
+        "dims": 1024,
+        "element_type": "float",
+        "index": true,
+        "similarity": "cosine",
+        "index_options": {
+          "type": "flat"
+        }
+      }
+    }
+  }
+}

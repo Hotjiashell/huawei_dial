@@ -1,0 +1,67 @@
+tools:
+  - class_name: examples.clarq_grpo.agent.ClarifyUserTool
+    config:
+      type: native
+      simulator:
+        base_url: ${oc.env:USER_SIMULATOR_BASE_URL,http://127.0.0.1:8005/v1}
+        model: ${oc.env:USER_SIMULATOR_MODEL}
+        api_key: ${oc.env:USER_SIMULATOR_API_KEY,EMPTY}
+        temperature: ${oc.env:USER_SIMULATOR_TEMPERATURE,0.0}
+        timeout: ${oc.env:USER_SIMULATOR_TIMEOUT,120}
+        max_retries: ${oc.env:USER_SIMULATOR_MAX_RETRIES,3}
+        enable_thinking: ${oc.env:USER_SIMULATOR_ENABLE_THINKING,false}
+        tokenizer_path: ${oc.env:USER_SIMULATOR_TOKENIZER_PATH,/data/pretrained_models/Qwen3-32B}
+        max_input_tokens: ${oc.env:USER_SIMULATOR_MAX_INPUT_TOKENS,7680}
+    tool_schema:
+      type: function
+      function:
+        name: clarify_user
+        description: Ask the simulated user one concise question for a missing user-known fact.
+        parameters:
+          type: object
+          properties:
+            question:
+              type: string
+              description: One concise and discriminative clarification question.
+          required:
+            - question
+
+  - class_name: examples.clarq_grpo.agent.SearchCaseTool
+    config:
+      type: native
+      search_server_host: ${oc.env:SEARCH_SERVER_HOST,http://127.0.0.1:9200}
+      search_strategy: ${oc.env:SEARCH_SERVER_STRATEGY,hybrid}
+      index: ${oc.env:ELASTICSEARCH_INDEX,clarq_cases}
+      elasticsearch_api_key: ${oc.env:ELASTICSEARCH_API_KEY,EMPTY}
+      elasticsearch_user: ${oc.env:ELASTICSEARCH_USER,elastic}
+      elasticsearch_password: ${oc.env:ELASTICSEARCH_PASSWORD,EMPTY}
+      elasticsearch_ca_cert: ${oc.env:ELASTICSEARCH_CA_CERT,EMPTY}
+      elasticsearch_verify_certs: ${oc.env:ELASTICSEARCH_VERIFY_CERTS,true}
+      embedding_url: ${oc.env:EMBEDDING_URL,http://127.0.0.1:8001/v1/embeddings}
+      embedding_model: ${oc.env:EMBEDDING_MODEL,bge-m3}
+      embedding_api_key: ${oc.env:EMBEDDING_API_KEY,EMPTY}
+      rank_window: ${oc.env:SEARCH_RANK_WINDOW,50}
+      vector_num_candidates: ${oc.env:VECTOR_NUM_CANDIDATES,200}
+      bm25_title_boost: ${oc.env:BM25_TITLE_BOOST,3.0}
+      rrf_rank_constant: ${oc.env:RRF_RANK_CONSTANT,60}
+      rrf_bm25_weight: ${oc.env:RRF_BM25_WEIGHT,1.0}
+      rrf_title_vector_weight: ${oc.env:RRF_TITLE_VECTOR_WEIGHT,1.0}
+      rrf_answer_vector_weight: ${oc.env:RRF_ANSWER_VECTOR_WEIGHT,1.0}
+      search_timeout: ${oc.env:SEARCH_TIMEOUT,30}
+      embedding_timeout: ${oc.env:EMBEDDING_TIMEOUT,60}
+      top_k: 5
+      max_searches: 4
+      case_content_chars: 1000
+    tool_schema:
+      type: function
+      function:
+        name: search_case
+        description: Retrieve the five most relevant cases from the hybrid ClarQ case index.
+        parameters:
+          type: object
+          properties:
+            query:
+              type: string
+              description: A focused retrieval query grounded in the user request and confirmed clarifications.
+          required:
+            - query

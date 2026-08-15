@@ -1,0 +1,23 @@
+- name: clarq_agent
+  _target_: examples.clarq_grpo.agent.ClarQAgentLoop
+  simulator_config:
+    base_url: ${oc.env:USER_SIMULATOR_BASE_URL,http://127.0.0.1:8005/v1}
+    model: ${oc.env:USER_SIMULATOR_MODEL}
+    api_key: ${oc.env:USER_SIMULATOR_API_KEY,EMPTY}
+    temperature: ${oc.env:USER_SIMULATOR_TEMPERATURE,0.0}
+    timeout: ${oc.env:USER_SIMULATOR_TIMEOUT,120}
+    max_retries: ${oc.env:USER_SIMULATOR_MAX_RETRIES,3}
+    enable_thinking: ${oc.env:USER_SIMULATOR_ENABLE_THINKING,false}
+    tokenizer_path: ${oc.env:USER_SIMULATOR_TOKENIZER_PATH,/data/pretrained_models/Qwen3-32B}
+    max_input_tokens: ${oc.env:USER_SIMULATOR_MAX_INPUT_TOKENS,7680}
+  reward_config:
+    satisfied: 0.3
+    not_satisfied: -1.0
+    top1: 1.0
+    top3: 0.6
+    top5: 0.3
+    miss: -0.5
+    repeat_search_penalty: -0.05
+    known_info_clarification_reward: 0.1
+    unknown_clarification_penalty: -0.02
+    invalid_clarification_penalty: -0.02
