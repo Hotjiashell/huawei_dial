@@ -1,0 +1,634 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Sequence
+from urllib.parse import urlsplit, urlunsplit
+
+from clarq_eval.clients import OpenAIChatClient, TrajectoryJudge, UserSimulator
+from clarq_eval.metrics import summarize_results
+from clarq_eval.models import EvaluationSample, load_samples
+from clarq_eval.reporting import append_jsonl, read_jsonl, write_json, write_report
+from clarq_eval.runner import EvaluationRunner
+
+
+EVAL_DIR = Path(__file__).resolve().parent
+WORKSPACE_DIR = EVAL_DIR.parent
+DEFAULT_TEST_ROOT = WORKSPACE_DIR / "ClarQ" / "profile_split" / "test"
+DEFAULT_VERL_ROOT = WORKSPACE_DIR / "verl_dial-main-h800"
+OUTPUT_FILENAMES = ("trajectories.jsonl", "errors.jsonl", "metrics.json", "report.md", "run_config.json")
+
+
+def _env(name: str, default: str | None = None) -> str | None:
+    value = os.environ.get(name)
+    return value if value not in (None, "") else default
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    value = _env(name)
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"Environment variable {name} must be true or false, got {value!r}")
+
+
+def _csv_strings(value: str | None) -> tuple[str, ...]:
+    return tuple(item.strip() for item in (value or "").split(",") if item.strip())
+
+
+def _csv_ints(value: str) -> tuple[int, ...]:
+    try:
+        values = tuple(int(item.strip()) for item in value.split(",") if item.strip())
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("expected comma-separated integers") from error
+    if not values or any(item <= 0 for item in values):
+        raise argparse.ArgumentTypeError("values must be positive comma-separated integers")
+    return tuple(sorted(set(values)))
+
+
+def _redact_url(value: str | None) -> str | None:
+    if not value:
+        return value
+    parsed = urlsplit(value)
+    hostname = parsed.hostname or ""
+    if ":" in hostname and not hostname.startswith("["):
+        hostname = f"[{hostname}]"
+    port = f":{parsed.port}" if parsed.port else ""
+    return urlunsplit((parsed.scheme, f"{hostname}{port}", parsed.path, "", ""))
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Evaluate a deployed ClarQ conversational retrieval policy on the test split.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument("--test-root", type=Path, default=DEFAULT_TEST_ROOT)
+    parser.add_argument("--verl-root", type=Path, default=DEFAULT_VERL_ROOT)
+    parser.add_argument("--output-dir", type=Path)
+    parser.add_argument("--domains", default=_env("EVAL_DOMAINS", ""), help="Comma-separated domains.")
+    parser.add_argument("--offset", type=int, default=int(_env("EVAL_OFFSET", "0")))
+    parser.add_argument("--limit", type=int, default=None)
+    parser.add_argument("--workers", type=int, default=int(_env("EVAL_WORKERS", "4")))
+
+    max_turns_env = _env("EVAL_MAX_TURNS")
+    top_k_env = _env("EVAL_TOP_K")
+    parser.add_argument("--max-turns", type=int, default=int(max_turns_env) if max_turns_env else None)
+    parser.add_argument("--max-searches", type=int, default=int(_env("EVAL_MAX_SEARCHES", "4")))
+    parser.add_argument("--top-k", type=int, default=int(top_k_env) if top_k_env else None)
+    parser.add_argument("--k-values", type=_csv_ints, default=_csv_ints(_env("EVAL_K_VALUES", "1,3,5")))
+    parser.add_argument("--success-k", type=int, default=int(_env("EVAL_SUCCESS_K", "1")))
+    parser.add_argument("--case-content-chars", type=int, default=int(_env("EVAL_CASE_CONTENT_CHARS", "1000")))
+    parser.add_argument("--policy-temperature", type=float, default=float(_env("POLICY_TEMPERATURE", "0")))
+    parser.add_argument("--policy-max-tokens", type=int, default=int(_env("POLICY_MAX_TOKENS", "512")))
+    parser.add_argument("--seed", type=int, default=int(_env("EVAL_SEED", "42")))
+    parser.add_argument(
+        "--policy-enable-thinking",
+        action=argparse.BooleanOptionalAction,
+        default=_env_bool("POLICY_ENABLE_THINKING", False),
+    )
+
+    parser.add_argument("--policy-base-url", default=_env("POLICY_BASE_URL"))
+    parser.add_argument("--policy-model", default=_env("POLICY_MODEL"))
+    parser.add_argument("--policy-api-key", default=_env("POLICY_API_KEY", "EMPTY"))
+    parser.add_argument("--policy-timeout", type=float, default=float(_env("POLICY_TIMEOUT", "120")))
+    parser.add_argument("--policy-max-retries", type=int, default=int(_env("POLICY_MAX_RETRIES", "3")))
+
+    parser.add_argument(
+        "--simulator-base-url",
+        default=_env("USER_SIMULATOR_BASE_URL", "http://127.0.0.1:8005/v1"),
+    )
+    parser.add_argument("--simulator-model", default=_env("USER_SIMULATOR_MODEL"))
+    parser.add_argument("--simulator-api-key", default=_env("USER_SIMULATOR_API_KEY", "EMPTY"))
+    parser.add_argument(
+        "--simulator-timeout",
+        type=float,
+        default=float(_env("USER_SIMULATOR_TIMEOUT", "120")),
+    )
+    parser.add_argument(
+        "--simulator-max-retries",
+        type=int,
+        default=int(_env("USER_SIMULATOR_MAX_RETRIES", "3")),
+    )
+
+    parser.add_argument("--judge-base-url", default=_env("JUDGE_BASE_URL"))
+    parser.add_argument("--judge-model", default=_env("JUDGE_MODEL"))
+    parser.add_argument("--judge-api-key", default=_env("JUDGE_API_KEY"))
+    parser.add_argument("--judge-timeout", type=float, default=float(_env("JUDGE_TIMEOUT", "120")))
+    parser.add_argument("--judge-max-retries", type=int, default=int(_env("JUDGE_MAX_RETRIES", "3")))
+    parser.add_argument("--skip-judge", action="store_true")
+
+    parser.add_argument(
+        "--search-server-host",
+        default=_env("SEARCH_SERVER_HOST", _env("ELASTICSEARCH_URL", "http://127.0.0.1:9200")),
+    )
+    parser.add_argument("--search-strategy", default=_env("SEARCH_SERVER_STRATEGY", "hybrid"))
+    parser.add_argument("--elasticsearch-index", default=_env("ELASTICSEARCH_INDEX", "clarq_cases"))
+    parser.add_argument("--elasticsearch-api-key", default=_env("ELASTICSEARCH_API_KEY", ""))
+    parser.add_argument("--elasticsearch-user", default=_env("ELASTICSEARCH_USER", "elastic"))
+    parser.add_argument("--elasticsearch-password", default=_env("ELASTICSEARCH_PASSWORD", ""))
+    parser.add_argument("--elasticsearch-ca-cert", default=_env("ELASTICSEARCH_CA_CERT", ""))
+    parser.add_argument(
+        "--elasticsearch-verify-certs",
+        action=argparse.BooleanOptionalAction,
+        default=_env_bool("ELASTICSEARCH_VERIFY_CERTS", True),
+    )
+    parser.add_argument(
+        "--embedding-url",
+        default=_env("EMBEDDING_URL", "http://127.0.0.1:8001/v1/embeddings"),
+    )
+    parser.add_argument("--embedding-model", default=_env("EMBEDDING_MODEL", "clarq-embedding"))
+    parser.add_argument("--embedding-api-key", default=_env("EMBEDDING_API_KEY", "EMPTY"))
+    parser.add_argument("--rank-window", type=int, default=int(_env("SEARCH_RANK_WINDOW", "50")))
+    parser.add_argument(
+        "--vector-num-candidates",
+        type=int,
+        default=int(_env("VECTOR_NUM_CANDIDATES", "200")),
+    )
+    parser.add_argument("--bm25-title-boost", type=float, default=float(_env("BM25_TITLE_BOOST", "3")))
+    parser.add_argument("--rrf-rank-constant", type=int, default=int(_env("RRF_RANK_CONSTANT", "60")))
+    parser.add_argument("--rrf-bm25-weight", type=float, default=float(_env("RRF_BM25_WEIGHT", "1")))
+    parser.add_argument(
+        "--rrf-title-vector-weight",
+        type=float,
+        default=float(_env("RRF_TITLE_VECTOR_WEIGHT", "1")),
+    )
+    parser.add_argument(
+        "--rrf-answer-vector-weight",
+        type=float,
+        default=float(_env("RRF_ANSWER_VECTOR_WEIGHT", "1")),
+    )
+    parser.add_argument("--search-timeout", type=float, default=float(_env("SEARCH_TIMEOUT", "30")))
+    parser.add_argument("--embedding-timeout", type=float, default=float(_env("EMBEDDING_TIMEOUT", "60")))
+
+    parser.add_argument("--resume", action="store_true", help="Resume and retry prior infrastructure failures.")
+    parser.add_argument("--aggregate-only", action="store_true", help="Rebuild metrics/report from trajectories.")
+    parser.add_argument("--check-only", action="store_true", help="Check data and external services, then exit.")
+    parser.add_argument("--skip-preflight", action="store_true")
+    parser.add_argument("--allow-infrastructure-failures", action="store_true")
+    return parser
+
+
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.output_dir is None:
+        if args.resume or args.aggregate_only:
+            parser.error("--output-dir is required with --resume or --aggregate-only")
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        args.output_dir = EVAL_DIR / "outputs" / stamp
+    if not args.aggregate_only:
+        if args.max_turns is None:
+            args.max_turns = 6
+        if args.top_k is None:
+            args.top_k = 5
+    positive_fields = (
+        "workers",
+        "max_turns",
+        "max_searches",
+        "top_k",
+        "success_k",
+        "case_content_chars",
+        "policy_max_tokens",
+        "policy_max_retries",
+        "simulator_max_retries",
+        "judge_max_retries",
+        "rank_window",
+        "vector_num_candidates",
+        "rrf_rank_constant",
+    )
+    for field in positive_fields:
+        value = getattr(args, field)
+        if value is not None and value <= 0:
+            parser.error(f"--{field.replace('_', '-')} must be positive")
+    if args.offset < 0:
+        parser.error("--offset must be non-negative")
+    if args.limit is not None and args.limit <= 0:
+        parser.error("--limit must be positive")
+    required_depth = max((*args.k_values, args.success_k))
+    if not args.aggregate_only and args.top_k < required_depth:
+        parser.error(f"--top-k must be at least {required_depth} for the configured metrics")
+    if args.aggregate_only and args.check_only:
+        parser.error("--aggregate-only and --check-only cannot be combined")
+    if not args.aggregate_only:
+        for option, value in (
+            ("--policy-base-url", args.policy_base_url),
+            ("--policy-model", args.policy_model),
+            ("--simulator-base-url", args.simulator_base_url),
+            ("--simulator-model", args.simulator_model),
+        ):
+            if not value:
+                parser.error(f"{option} is required (or set the corresponding environment variable)")
+        if not args.skip_judge:
+            args.judge_base_url = args.judge_base_url or args.simulator_base_url
+            args.judge_model = args.judge_model or args.simulator_model
+            args.judge_api_key = args.judge_api_key or args.simulator_api_key
+    args.domains = _csv_strings(args.domains)
+    args.test_root = args.test_root.resolve()
+    args.verl_root = args.verl_root.resolve()
+    args.output_dir = args.output_dir.resolve()
+    return args
+
+
+def retriever_config(args: argparse.Namespace) -> dict[str, Any]:
+    return {
+        "search_server_host": args.search_server_host,
+        "search_strategy": args.search_strategy,
+        "index": args.elasticsearch_index,
+        "elasticsearch_api_key": args.elasticsearch_api_key,
+        "elasticsearch_user": args.elasticsearch_user,
+        "elasticsearch_password": args.elasticsearch_password,
+        "elasticsearch_ca_cert": args.elasticsearch_ca_cert,
+        "elasticsearch_verify_certs": args.elasticsearch_verify_certs,
+        "embedding_url": args.embedding_url,
+        "embedding_model": args.embedding_model,
+        "embedding_api_key": args.embedding_api_key,
+        "rank_window": args.rank_window,
+        "vector_num_candidates": args.vector_num_candidates,
+        "bm25_title_boost": args.bm25_title_boost,
+        "rrf_rank_constant": args.rrf_rank_constant,
+        "rrf_bm25_weight": args.rrf_bm25_weight,
+        "rrf_title_vector_weight": args.rrf_title_vector_weight,
+        "rrf_answer_vector_weight": args.rrf_answer_vector_weight,
+        "search_timeout": args.search_timeout,
+        "embedding_timeout": args.embedding_timeout,
+        "top_k": args.top_k,
+    }
+
+
+def _load_retriever(args: argparse.Namespace) -> Any:
+    if not (args.verl_root / "examples" / "clarq_grpo" / "retriever.py").is_file():
+        raise FileNotFoundError(f"ClarQ retriever not found under {args.verl_root}")
+    root = str(args.verl_root)
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    try:
+        from examples.clarq_grpo.retriever import CaseRetriever
+    except ModuleNotFoundError as error:
+        if error.name == "requests":
+            raise RuntimeError(
+                "The requests package is required for online evaluation; "
+                "install workspace/eval/requirements.txt"
+            ) from error
+        raise
+
+    return CaseRetriever(retriever_config(args))
+
+
+def _client(base_url: str, model: str, api_key: str, timeout: float, retries: int) -> OpenAIChatClient:
+    return OpenAIChatClient(
+        base_url=base_url,
+        model=model,
+        api_key=api_key,
+        timeout=timeout,
+        max_retries=retries,
+    )
+
+
+def build_components(args: argparse.Namespace) -> tuple[EvaluationRunner, list[tuple[str, OpenAIChatClient]], Any]:
+    policy_client = _client(
+        args.policy_base_url,
+        args.policy_model,
+        args.policy_api_key,
+        args.policy_timeout,
+        args.policy_max_retries,
+    )
+    simulator_client = _client(
+        args.simulator_base_url,
+        args.simulator_model,
+        args.simulator_api_key,
+        args.simulator_timeout,
+        args.simulator_max_retries,
+    )
+    health_clients = [("policy", policy_client), ("user simulator", simulator_client)]
+    judge = None
+    if not args.skip_judge:
+        judge_client = _client(
+            args.judge_base_url,
+            args.judge_model,
+            args.judge_api_key,
+            args.judge_timeout,
+            args.judge_max_retries,
+        )
+        judge = TrajectoryJudge(judge_client)
+        health_clients.append(("judge", judge_client))
+
+    retriever = _load_retriever(args)
+    runner = EvaluationRunner(
+        policy_client=policy_client,
+        user_simulator=UserSimulator(simulator_client),
+        retriever=retriever,
+        judge=judge,
+        max_turns=args.max_turns,
+        max_searches=args.max_searches,
+        top_k=args.top_k,
+        case_content_chars=args.case_content_chars,
+        temperature=args.policy_temperature,
+        max_tokens=args.policy_max_tokens,
+        seed=args.seed,
+        enable_thinking=args.policy_enable_thinking,
+    )
+    return runner, health_clients, retriever
+
+
+def _run_config(args: argparse.Namespace) -> dict[str, Any]:
+    return {
+        "schema_version": "1.0",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "data": {
+            "test_root": str(args.test_root),
+            "domains": list(args.domains),
+            "offset": args.offset,
+            "limit": args.limit,
+        },
+        "trajectory": {
+            "max_turns": args.max_turns,
+            "max_searches": args.max_searches,
+            "top_k": args.top_k,
+            "case_content_chars": args.case_content_chars,
+            "temperature": args.policy_temperature,
+            "max_tokens": args.policy_max_tokens,
+            "seed": args.seed,
+            "enable_thinking": args.policy_enable_thinking,
+        },
+        "metrics": {"k_values": list(args.k_values), "success_k": args.success_k},
+        "services": {
+            "policy": {"base_url": _redact_url(args.policy_base_url), "model": args.policy_model},
+            "user_simulator": {
+                "base_url": _redact_url(args.simulator_base_url),
+                "model": args.simulator_model,
+            },
+            "judge": None
+            if args.skip_judge
+            else {"base_url": _redact_url(args.judge_base_url), "model": args.judge_model},
+        },
+        "retrieval": {
+            "search_server_host": _redact_url(args.search_server_host),
+            "search_strategy": args.search_strategy,
+            "index": args.elasticsearch_index,
+            "embedding_url": _redact_url(args.embedding_url),
+            "embedding_model": args.embedding_model,
+            "rank_window": args.rank_window,
+            "vector_num_candidates": args.vector_num_candidates,
+            "bm25_title_boost": args.bm25_title_boost,
+            "rrf_rank_constant": args.rrf_rank_constant,
+            "rrf_bm25_weight": args.rrf_bm25_weight,
+            "rrf_title_vector_weight": args.rrf_title_vector_weight,
+            "rrf_answer_vector_weight": args.rrf_answer_vector_weight,
+        },
+        "execution": {"workers": args.workers, "judge_enabled": not args.skip_judge},
+    }
+
+
+def _resume_signature(config: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: config.get(key)
+        for key in ("data", "trajectory", "services", "retrieval")
+    }
+
+
+def _prepare_output(args: argparse.Namespace, config: dict[str, Any]) -> None:
+    output_dir = args.output_dir
+    output_dir.mkdir(parents=True, exist_ok=True)
+    config_path = output_dir / "run_config.json"
+    existing_outputs = [name for name in OUTPUT_FILENAMES if (output_dir / name).exists()]
+    if existing_outputs and not args.resume:
+        raise FileExistsError(
+            f"Output directory already contains evaluation files: {output_dir}. "
+            "Use --resume or choose a new --output-dir."
+        )
+    if args.resume:
+        if not config_path.is_file():
+            raise FileNotFoundError(f"Cannot resume without {config_path}")
+        with config_path.open(encoding="utf-8") as file:
+            previous_config = json.load(file)
+        if _resume_signature(previous_config) != _resume_signature(config):
+            raise ValueError(
+                "Resume configuration does not match the existing trajectory configuration. "
+                "Use the original data/model/retrieval/trajectory settings or a new output directory."
+            )
+        config["created_at"] = previous_config.get("created_at", config["created_at"])
+        config["resumed_at"] = datetime.now(timezone.utc).isoformat()
+    write_json(config_path, config)
+
+
+def latest_records(records: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    latest: dict[str, dict[str, Any]] = {}
+    for record in records:
+        sample_id = str(record.get("sample_id") or "").strip()
+        if not sample_id:
+            raise ValueError("Every trajectory record must contain a non-empty sample_id")
+        latest[sample_id] = record
+    return latest
+
+
+def _error_record(sample: EvaluationSample, error: Exception, elapsed_seconds: float) -> dict[str, Any]:
+    return {
+        "schema_version": "1.0",
+        "sample_id": sample.sample_id,
+        "domain": sample.domain,
+        "target_case_id": sample.target_case_id,
+        "initial_question": sample.initial_question,
+        "core_intent": sample.core_intent,
+        "known_info": list(sample.known_info),
+        "baseline_results": [],
+        "events": [],
+        "final_results": [],
+        "stop_reason": "infrastructure_failure",
+        "turn_count": 0,
+        "clarification_count": 0,
+        "search_count": 0,
+        "elapsed_seconds": elapsed_seconds,
+        "judge": None,
+        "judge_error": None,
+        "error": {"type": type(error).__name__, "message": str(error)},
+    }
+
+
+def preflight(
+    samples: list[EvaluationSample],
+    health_clients: list[tuple[str, OpenAIChatClient]],
+    retriever: Any,
+) -> None:
+    checked: set[tuple[str, str, str]] = set()
+    for name, client in health_clients:
+        identity = (client.base_url, client.model, client.api_key)
+        if identity in checked:
+            print(f"[preflight] {name}: shared endpoint already checked ({client.model})")
+            continue
+        try:
+            client.health_check()
+        except Exception as error:
+            raise RuntimeError(f"Preflight failed for {name}: {type(error).__name__}: {error}") from error
+        checked.add(identity)
+        print(f"[preflight] {name}: OK ({client.model})")
+    try:
+        retrieval = retriever.search(samples[0].initial_question, 1)
+    except Exception as error:
+        raise RuntimeError(f"Preflight failed for retriever: {type(error).__name__}: {error}") from error
+    if not retrieval:
+        raise RuntimeError(
+            "Preflight failed for retriever: the probe query returned zero cases; "
+            "check the index, search strategy, embedding model, and field mappings"
+        )
+    print(f"[preflight] retriever: OK ({len(retrieval)} result for probe query)")
+
+
+def aggregate(
+    output_dir: Path,
+    k_values: tuple[int, ...],
+    success_k: int,
+    max_turns: int | None,
+) -> dict[str, Any]:
+    trajectory_path = output_dir / "trajectories.jsonl"
+    if not trajectory_path.is_file():
+        raise FileNotFoundError(f"Trajectory file does not exist: {trajectory_path}")
+    records = list(latest_records(read_jsonl(trajectory_path)).values())
+    run_config_path = output_dir / "run_config.json"
+    run_config: dict[str, Any] = {}
+    if run_config_path.is_file():
+        with run_config_path.open(encoding="utf-8") as file:
+            run_config = json.load(file)
+
+    stored_top_k = run_config.get("trajectory", {}).get("top_k")
+    if stored_top_k is None:
+        stored_depths = [
+            record.get("runner_config", {}).get("top_k")
+            for record in records
+            if not record.get("error")
+        ]
+        stored_depths = [int(depth) for depth in stored_depths if depth is not None]
+        stored_top_k = min(stored_depths) if stored_depths else None
+    required_depth = max((*k_values, success_k))
+    if stored_top_k is not None and required_depth > int(stored_top_k):
+        raise ValueError(
+            f"Cannot compute K={required_depth}: stored trajectories only retain Top {stored_top_k}"
+        )
+
+    if max_turns is None:
+        max_turns = run_config.get("trajectory", {}).get("max_turns")
+    if max_turns is None:
+        stored_turn_limits = [
+            record.get("runner_config", {}).get("max_turns")
+            for record in records
+            if not record.get("error")
+        ]
+        stored_turn_limits = [int(turns) for turns in stored_turn_limits if turns is not None]
+        max_turns = max(stored_turn_limits) if stored_turn_limits else 6
+    metrics = summarize_results(
+        records,
+        k_values=k_values,
+        success_k=success_k,
+        max_turns=int(max_turns),
+    )
+    write_json(output_dir / "metrics.json", metrics)
+    write_report(output_dir / "report.md", metrics)
+    return metrics
+
+
+def run_evaluation(
+    args: argparse.Namespace,
+    samples: list[EvaluationSample],
+    runner: EvaluationRunner,
+) -> dict[str, Any]:
+    trajectory_path = args.output_dir / "trajectories.jsonl"
+    error_path = args.output_dir / "errors.jsonl"
+    previous = latest_records(read_jsonl(trajectory_path))
+    completed_ids = {sample_id for sample_id, record in previous.items() if not record.get("error")}
+    pending = [sample for sample in samples if sample.sample_id not in completed_ids]
+    if completed_ids:
+        print(f"[resume] skipping {len(completed_ids)} completed samples; running {len(pending)} samples")
+
+    processed = 0
+    executor = ThreadPoolExecutor(max_workers=args.workers, thread_name_prefix="clarq-eval")
+    try:
+        futures = {}
+        for sample in pending:
+            started_at = time.monotonic()
+            future = executor.submit(runner.run, sample)
+            futures[future] = (sample, started_at)
+        for future in as_completed(futures):
+            sample, started_at = futures[future]
+            try:
+                record = future.result()
+            except Exception as error:
+                record = _error_record(sample, error, time.monotonic() - started_at)
+                append_jsonl(error_path, record)
+            append_jsonl(trajectory_path, record)
+            processed += 1
+            state = "ERROR" if record.get("error") else "OK"
+            print(f"[{processed}/{len(pending)}] {state} {sample.sample_id}", flush=True)
+    except KeyboardInterrupt:
+        for future in futures:
+            future.cancel()
+        executor.shutdown(wait=False, cancel_futures=True)
+        print("Interrupted; completed trajectories are durable. Resume with --resume.", file=sys.stderr)
+        raise
+    else:
+        executor.shutdown(wait=True)
+
+    selected_latest = latest_records(read_jsonl(trajectory_path))
+    selected_records = [selected_latest[sample.sample_id] for sample in samples if sample.sample_id in selected_latest]
+    metrics = summarize_results(
+        selected_records,
+        k_values=args.k_values,
+        success_k=args.success_k,
+        max_turns=args.max_turns,
+    )
+    write_json(args.output_dir / "metrics.json", metrics)
+    write_report(args.output_dir / "report.md", metrics)
+    return metrics
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = parse_args(argv)
+    if args.aggregate_only:
+        metrics = aggregate(args.output_dir, args.k_values, args.success_k, args.max_turns)
+        print(f"Aggregated {metrics['overall']['sample_counts']['requested']} latest trajectories")
+        print(f"Report: {args.output_dir / 'report.md'}")
+        if (
+            metrics["overall"]["sample_counts"]["infrastructure_failures"]
+            and not args.allow_infrastructure_failures
+        ):
+            return 2
+        return 0
+
+    samples = load_samples(args.test_root, domains=args.domains, offset=args.offset, limit=args.limit)
+    print(f"Loaded {len(samples)} samples from {args.test_root}")
+    runner, health_clients, retriever = build_components(args)
+    if not args.skip_preflight:
+        preflight(samples, health_clients, retriever)
+    if args.check_only:
+        print("Preflight checks passed; no evaluation was run.")
+        return 0
+
+    config = _run_config(args)
+    _prepare_output(args, config)
+    metrics = run_evaluation(args, samples, runner)
+    counts = metrics["overall"]["sample_counts"]
+    print(
+        f"Evaluation finished: {counts['completed']} completed, "
+        f"{counts['infrastructure_failures']} infrastructure failures"
+    )
+    print(f"Report: {args.output_dir / 'report.md'}")
+    if counts["infrastructure_failures"] and not args.allow_infrastructure_failures:
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except (FileNotFoundError, FileExistsError, RuntimeError, ValueError) as error:
+        print(f"error: {error}", file=sys.stderr)
+        raise SystemExit(2) from error
