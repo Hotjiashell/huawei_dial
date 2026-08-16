@@ -11,6 +11,7 @@ def result_template(sample_id: str, target: str) -> dict:
         "sample_id": sample_id,
         "domain": "domain-a",
         "target_case_id": target,
+        "target_case_title": f"title-{target}",
         "baseline_results": [],
         "events": [],
         "final_results": [],
@@ -37,7 +38,10 @@ class MetricTests(unittest.TestCase):
     def test_recall_gain_success_turn_judge_and_failure_denominator(self) -> None:
         first = result_template("first", "target-a")
         first["baseline_results"] = [{"case_id": "miss"}]
-        first["final_results"] = [{"case_id": "target-a"}, {"case_id": "other"}]
+        first["final_results"] = [
+            {"case_id": "target-a", "title": "title-target-a"},
+            {"case_id": "other", "title": "other-title"},
+        ]
         first["events"] = [
             {"turn": 1, "action": {"type": "clarify_user"}},
             {
@@ -47,6 +51,7 @@ class MetricTests(unittest.TestCase):
                 "search_results": first["final_results"],
                 "clarifications_since_previous_search": 1,
                 "pre_clarification_case_ids": ["miss"],
+                "pre_clarification_case_titles": ["miss-title"],
             },
         ]
         first["clarification_count"] = 1
@@ -58,11 +63,11 @@ class MetricTests(unittest.TestCase):
         first["simulator_feedback"] = SATISFIED_DONE_TOKEN
 
         second = result_template("second", "target-b")
-        second["baseline_results"] = [{"case_id": "target-b"}]
+        second["baseline_results"] = [{"case_id": "target-b", "title": "title-target-b"}]
         second["final_results"] = [
-            {"case_id": "x"},
-            {"case_id": "y"},
-            {"case_id": "target-b"},
+            {"case_id": "x", "title": "x-title"},
+            {"case_id": "y", "title": "y-title"},
+            {"case_id": "target-b", "title": "title-target-b"},
         ]
         second["events"] = [
             {
@@ -104,13 +109,13 @@ class MetricTests(unittest.TestCase):
 
     def test_success_is_independent_of_gt_hit_and_complete(self) -> None:
         satisfied_gt_miss = result_template("satisfied", "target")
-        satisfied_gt_miss["final_results"] = [{"case_id": "other"}]
+        satisfied_gt_miss["final_results"] = [{"case_id": "other", "title": "other-title"}]
         satisfied_gt_miss["simulator_feedback"] = SATISFIED_DONE_TOKEN
         satisfied_gt_miss["stop_reason"] = "unexpected_text"
         satisfied_gt_miss["turn_count"] = 2
 
         failed_gt_hit = result_template("failed", "target")
-        failed_gt_hit["final_results"] = [{"case_id": "target"}]
+        failed_gt_hit["final_results"] = [{"case_id": "target", "title": "title-target"}]
         failed_gt_hit["simulator_feedback"] = FAILED_DONE_TOKEN
         failed_gt_hit["turn_count"] = 1
 
@@ -128,6 +133,23 @@ class MetricTests(unittest.TestCase):
         result = result_template("legacy", "target")
         result.pop("simulator_feedback")
         with self.assertRaisesRegex(ValueError, "legacy trajectories"):
+            summarize_results([result])
+
+    def test_recall_matches_title_instead_of_case_id(self) -> None:
+        result = result_template("title-match", "target-id")
+        result["target_case_title"] = "Canonical title"
+        result["final_results"] = [{"case_id": "different-id", "title": "Canonical title"}]
+        metrics = summarize_results([result], k_values=(1,), max_turns=2)
+        self.assertEqual(metrics["overall"]["result"]["final_recall_at_k"]["1"], 1.0)
+
+        result["final_results"] = [{"case_id": "target-id", "title": "Different title"}]
+        metrics = summarize_results([result], k_values=(1,), max_turns=2)
+        self.assertEqual(metrics["overall"]["result"]["final_recall_at_k"]["1"], 0.0)
+
+    def test_missing_target_title_is_rejected(self) -> None:
+        result = result_template("legacy", "target")
+        result.pop("target_case_title")
+        with self.assertRaisesRegex(ValueError, "target_case_title"):
             summarize_results([result])
 
     def test_validation(self) -> None:

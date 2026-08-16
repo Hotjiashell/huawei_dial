@@ -14,7 +14,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 from clarq_eval.clients import OpenAIChatClient, TrajectoryJudge, UserSimulator
 from clarq_eval.metrics import summarize_results
-from clarq_eval.models import EvaluationSample, load_samples
+from clarq_eval.models import EvaluationSample, load_case_titles, load_samples
 from clarq_eval.reporting import append_jsonl, read_jsonl, write_json, write_report
 from clarq_eval.runner import EvaluationRunner
 
@@ -22,6 +22,7 @@ from clarq_eval.runner import EvaluationRunner
 EVAL_DIR = Path(__file__).resolve().parent
 WORKSPACE_DIR = EVAL_DIR.parent
 DEFAULT_TEST_ROOT = WORKSPACE_DIR / "ClarQ" / "profile_split" / "test"
+DEFAULT_CASE_DOCUMENT = WORKSPACE_DIR / "ClarQ" / "case_answers_with_title.json"
 DEFAULT_VERL_ROOT = WORKSPACE_DIR / "verl_dial-main-h800"
 OUTPUT_FILENAMES = ("trajectories.jsonl", "errors.jsonl", "metrics.json", "report.md", "run_config.json")
 
@@ -74,6 +75,15 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--test-root", type=Path, default=DEFAULT_TEST_ROOT)
+    parser.add_argument(
+        "--case-document",
+        type=Path,
+        default=_env(
+            "CASE_DOCUMENT_PATH",
+            _env("CASE_ANSWERS_PATH", str(DEFAULT_CASE_DOCUMENT)),
+        ),
+        help="JSON document used to resolve each test sample case_id to its canonical title.",
+    )
     parser.add_argument("--verl-root", type=Path, default=DEFAULT_VERL_ROOT)
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--domains", default=_env("EVAL_DOMAINS", ""), help="Comma-separated domains.")
@@ -237,6 +247,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             args.judge_api_key = args.judge_api_key or args.simulator_api_key
     args.domains = _csv_strings(args.domains)
     args.test_root = args.test_root.resolve()
+    args.case_document = args.case_document.resolve()
     args.verl_root = args.verl_root.resolve()
     args.output_dir = args.output_dir.resolve()
     return args
@@ -345,10 +356,11 @@ def build_components(args: argparse.Namespace) -> tuple[EvaluationRunner, list[t
 
 def _run_config(args: argparse.Namespace) -> dict[str, Any]:
     return {
-        "schema_version": "2.0",
+        "schema_version": "2.1",
         "created_at": datetime.now(timezone.utc).isoformat(),
         "data": {
             "test_root": str(args.test_root),
+            "case_document": str(args.case_document),
             "domains": list(args.domains),
             "offset": args.offset,
             "limit": args.limit,
@@ -367,6 +379,8 @@ def _run_config(args: argparse.Namespace) -> dict[str, Any]:
             "k_values": list(args.k_values),
             "success_definition": "simulator_feedback == <SATISFIED_DONE>",
             "success_requires_complete": False,
+            "ground_truth_match_field": "title",
+            "ground_truth_title_source": "case_id resolved from data.case_document",
         },
         "services": {
             "policy": {"base_url": _redact_url(args.policy_base_url), "model": args.policy_model},
@@ -447,10 +461,11 @@ def latest_records(records: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
 
 def _error_record(sample: EvaluationSample, error: Exception, elapsed_seconds: float) -> dict[str, Any]:
     return {
-        "schema_version": "2.0",
+        "schema_version": "2.1",
         "sample_id": sample.sample_id,
         "domain": sample.domain,
         "target_case_id": sample.target_case_id,
+        "target_case_title": sample.target_case_title,
         "initial_question": sample.initial_question,
         "core_intent": sample.core_intent,
         "known_info": list(sample.known_info),
@@ -615,7 +630,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 2
         return 0
 
-    samples = load_samples(args.test_root, domains=args.domains, offset=args.offset, limit=args.limit)
+    case_titles = load_case_titles(args.case_document)
+    samples = load_samples(
+        args.test_root,
+        domains=args.domains,
+        offset=args.offset,
+        limit=args.limit,
+        case_titles=case_titles,
+    )
     print(f"Loaded {len(samples)} samples from {args.test_root}")
     runner, health_clients, retriever = build_components(args)
     if not args.skip_preflight:

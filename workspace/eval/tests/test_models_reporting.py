@@ -13,7 +13,7 @@ import _bootstrap  # noqa: F401
 
 from clarq_eval.clients import SATISFIED_DONE_TOKEN
 from clarq_eval.metrics import summarize_results
-from clarq_eval.models import EvaluationSample, load_samples
+from clarq_eval.models import EvaluationSample, load_case_titles, load_samples
 from clarq_eval.reporting import append_jsonl, read_jsonl, render_markdown, write_json, write_report
 from evaluate import (
     _prepare_output,
@@ -27,11 +27,12 @@ from evaluate import (
 
 
 def successful_result(sample: EvaluationSample) -> dict:
-    cases = [{"case_id": sample.target_case_id}]
+    cases = [{"case_id": sample.target_case_id, "title": sample.target_case_title}]
     return {
         "sample_id": sample.sample_id,
         "domain": sample.domain,
         "target_case_id": sample.target_case_id,
+        "target_case_title": sample.target_case_title,
         "baseline_results": [],
         "events": [
             {
@@ -109,6 +110,61 @@ class ModelAndReportingTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 load_samples(root, domains=("unknown",))
 
+    def test_case_title_document_and_sample_mapping(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            data_root = root / "test"
+            data_root.mkdir()
+            document = root / "cases.json"
+            document.write_text(
+                json.dumps([{"case_id": "case-1", "title": "Canonical title"}]),
+                encoding="utf-8",
+            )
+            self.assertEqual(load_case_titles(document), {"case-1": "Canonical title"})
+            mapping = root / "mapping.json"
+            mapping.write_text(json.dumps({"case-1": "Mapped title"}), encoding="utf-8")
+            self.assertEqual(load_case_titles(mapping), {"case-1": "Mapped title"})
+
+            (data_root / "money.json").write_text(
+                json.dumps(
+                    {
+                        "id": "sample-1",
+                        "case_id": "case-1",
+                        "context": "question",
+                        "core_intent": "intent",
+                        "known_info": [],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            samples = load_samples(data_root, case_titles={"case-1": "Canonical title"})
+            self.assertEqual(samples[0].target_case_title, "Canonical title")
+            with self.assertRaisesRegex(ValueError, "missing from the case title document"):
+                load_samples(data_root, case_titles={"other": "Other title"})
+
+            duplicate = root / "duplicate.json"
+            duplicate.write_text(
+                json.dumps([
+                    {"case_id": "case-1", "title": "one"},
+                    {"case_id": "case-1", "title": "two"},
+                ]),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "Duplicate case_id"):
+                load_case_titles(duplicate)
+
+    def test_case_title_document_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with self.assertRaises(FileNotFoundError):
+                load_case_titles(root / "missing.json")
+
+            missing_title = root / "missing-title.json"
+            missing_title.write_text(json.dumps([{"case_id": "case-1"}]), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "non-empty case_id and title"):
+                load_case_titles(missing_title)
+
     def test_append_read_latest_and_atomic_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -131,16 +187,17 @@ class ModelAndReportingTests(unittest.TestCase):
             "sample_id": "one",
             "domain": "money",
             "target_case_id": "target",
-            "baseline_results": [{"case_id": "other"}],
+            "target_case_title": "Target title",
+            "baseline_results": [{"case_id": "other", "title": "Other title"}],
             "events": [
                 {
                     "turn": 1,
                     "action": {"type": "search_case"},
                     "search_executed": True,
-                    "search_results": [{"case_id": "target"}],
+                    "search_results": [{"case_id": "target", "title": "Target title"}],
                 }
             ],
-            "final_results": [{"case_id": "target"}],
+            "final_results": [{"case_id": "target", "title": "Target title"}],
             "stop_reason": "complete",
             "turn_count": 2,
             "clarification_count": 0,
@@ -178,7 +235,7 @@ class ModelAndReportingTests(unittest.TestCase):
         self.assertIsNone(args.top_k)
 
     def test_offline_aggregate_rejects_k_beyond_stored_depth(self) -> None:
-        sample = EvaluationSample("one", "money", "target", "question", "intent", ())
+        sample = EvaluationSample("one", "money", "target", "question", "intent", (), "Target title")
         result = successful_result(sample)
         with tempfile.TemporaryDirectory() as directory:
             output_dir = Path(directory)
@@ -243,6 +300,7 @@ class ModelAndReportingTests(unittest.TestCase):
                 sample_id=f"sample-{index}",
                 domain="money",
                 target_case_id=f"case-{index}",
+                target_case_title=f"title-{index}",
                 initial_question=f"question {index}",
                 core_intent=f"intent {index}",
                 known_info=(),
@@ -272,7 +330,7 @@ class ModelAndReportingTests(unittest.TestCase):
             self.assertEqual(len(read_jsonl(Path(directory) / "trajectories.jsonl")), 3)
 
     def test_preflight_deduplicates_shared_model_and_rejects_empty_index(self) -> None:
-        sample = EvaluationSample("one", "money", "target", "question", "intent", ())
+        sample = EvaluationSample("one", "money", "target", "question", "intent", (), "Target title")
         client = FakeHealthClient()
 
         class EmptyRetriever:

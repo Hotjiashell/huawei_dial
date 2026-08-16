@@ -5,7 +5,13 @@
 
 ## 1. 符号与样本范围
 
-- 测试样本 $i$ 的唯一正确案例为 $g_i$，来自数据字段 `case_id`。
+- 测试样本 $i$ 的标准案例标题为 $g_i$。测试数据仍提供 `case_id`，评估启动时从可配置的
+  案例文档（默认 `workspace/ClarQ/case_answers_with_title.json`）解析出对应 `title`；
+  `case_id` 只用于这一步映射和轨迹审计。
+- 检索结果中的案例仍保留服务返回的 `case_id`，但所有召回、MRR 和追问增益的命中判断
+  都使用 `title` 的精确匹配（区分大小写，去除首尾空白）。
+- title 不要求全局唯一；如果案例文档中多个案例具有完全相同的 title，检索到其中任意一个
+  都按该 title 命中。这是按 title 评估的既定语义。
 - 一次检索返回按相关性排序的案例列表 $R_i=[r_{i,1},...,r_{i,K}]$。
 - `baseline` 是直接用原始问题 `context` 检索，不经过 Agent。
 - `first`、`final` 分别是 Agent 第一次、最后一次真实执行的检索。
@@ -51,9 +57,11 @@ SuccessRate = \frac{1}{N}\sum_{i=1}^{N}
 \]
 
 模拟器返回空字符串、非法选项或 HTTP 400 时，与训练一致回退为 `<FAILED_DONE>`；其他服务
-错误按基础设施失败处理。GT `case_id` 是否命中不参与 Success 判定，只用于下方的
-Recall@K 和 MRR。因此，可能出现“GT 未命中但 judge 满意”或“GT 命中但 judge 不满意”，
-报告会如实保留这两组信号。
+错误按基础设施失败处理。标准 title 是否命中不参与 Success 判定，只用于下方的
+Recall@K、MRR 和追问增益；测试数据中的 `case_id` 只用于解析标准 title 和轨迹审计。
+因此，可能出现“GT title 未命中但 judge 满意”或“GT title 命中但 judge 不满意”，报告会
+如实保留这两组信号。标准 title 解析失败时样本不能进入在线评估；缺少
+`target_case_title` 的旧轨迹不能按新口径离线聚合。
 
 ### MRR
 

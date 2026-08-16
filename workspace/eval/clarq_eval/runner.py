@@ -179,6 +179,7 @@ class EvaluationRunner:
         search_attempt_count = 0
         pending_clarifications = 0
         clarification_before_ids: list[str] | None = None
+        clarification_before_titles: list[str] | None = None
         asked_questions: set[str] = set()
         stop_reason = "max_turns"
         terminal_text = ""
@@ -248,6 +249,7 @@ class EvaluationRunner:
                 clarification_count += 1
                 if pending_clarifications == 0:
                     clarification_before_ids = [case["case_id"] for case in last_search_results]
+                    clarification_before_titles = [case["title"] for case in last_search_results]
                 pending_clarifications += 1
 
                 reply = self.user_simulator.answer(sample, question)
@@ -326,10 +328,12 @@ class EvaluationRunner:
                     )
                     if pending_clarifications:
                         event["pre_clarification_case_ids"] = clarification_before_ids or []
+                        event["pre_clarification_case_titles"] = clarification_before_titles or []
                     final_results = cases
                     last_search_results = cases
                     pending_clarifications = 0
                     clarification_before_ids = None
+                    clarification_before_titles = None
 
                 messages.append(
                     {
@@ -348,10 +352,11 @@ class EvaluationRunner:
             break
 
         result: dict[str, Any] = {
-            "schema_version": "2.0",
+            "schema_version": "2.1",
             "sample_id": sample.sample_id,
             "domain": sample.domain,
             "target_case_id": sample.target_case_id,
+            "target_case_title": sample.target_case_title,
             "initial_question": sample.initial_question,
             "core_intent": sample.core_intent,
             "known_info": list(sample.known_info),

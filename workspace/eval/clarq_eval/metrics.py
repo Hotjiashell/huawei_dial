@@ -8,20 +8,34 @@ from typing import Any, Iterable
 from .clients import FAILED_DONE_TOKEN, JUDGE_FIELDS, SATISFIED_DONE_TOKEN
 
 
-def _case_ids(cases: Iterable[dict[str, Any]]) -> list[str]:
-    return [str(case.get("case_id") or "") for case in cases]
+def _case_titles(cases: Iterable[dict[str, Any]]) -> list[str]:
+    return [str(case.get("title") or "").strip() for case in cases]
 
 
-def _rank(cases: Iterable[dict[str, Any]], target_case_id: str) -> int:
+def _rank(cases: Iterable[dict[str, Any]], target_case_title: str) -> int:
     return next(
-        (rank for rank, case_id in enumerate(_case_ids(cases), start=1) if case_id == target_case_id),
+        (
+            rank
+            for rank, title in enumerate(_case_titles(cases), start=1)
+            if title == target_case_title
+        ),
         0,
     )
 
 
-def _hit(cases: Iterable[dict[str, Any]], target_case_id: str, k: int) -> int:
-    rank = _rank(cases, target_case_id)
+def _hit(cases: Iterable[dict[str, Any]], target_case_title: str, k: int) -> int:
+    rank = _rank(cases, target_case_title)
     return int(1 <= rank <= k)
+
+
+def _target_title(result: dict[str, Any]) -> str:
+    title = str(result.get("target_case_title") or "").strip()
+    if not title:
+        raise ValueError(
+            "Completed trajectories must contain target_case_title; "
+            "legacy trajectories must be evaluated again"
+        )
+    return title
 
 
 def _ratio(numerator: int, denominator: int) -> float | None:
@@ -81,14 +95,14 @@ def _summarize_group(
     failures = [result for result in results if result.get("error")]
     denominator = len(completed)
 
-    final_ranks = [_rank(result.get("final_results", []), str(result["target_case_id"])) for result in completed]
+    final_ranks = [_rank(result.get("final_results", []), _target_title(result)) for result in completed]
     baseline_ranks = [
-        _rank(result.get("baseline_results", []), str(result["target_case_id"])) for result in completed
+        _rank(result.get("baseline_results", []), _target_title(result)) for result in completed
     ]
     first_search_ranks: list[int] = []
     best_search_ranks: list[int] = []
     for result in completed:
-        target = str(result["target_case_id"])
+        target = _target_title(result)
         events = _executed_search_events(result)
         first_search_ranks.append(_rank(events[0].get("search_results", []), target) if events else 0)
         positive_ranks = [
@@ -127,12 +141,12 @@ def _summarize_group(
 
     clarification_pairs: list[tuple[list[str], list[dict[str, Any]], str]] = []
     for result in completed:
-        target = str(result["target_case_id"])
+        target = _target_title(result)
         for event in _executed_search_events(result):
             if int(event.get("clarifications_since_previous_search", 0)) > 0:
                 clarification_pairs.append(
                     (
-                        [str(case_id) for case_id in event.get("pre_clarification_case_ids", [])],
+                        [str(title).strip() for title in event.get("pre_clarification_case_titles", [])],
                         event.get("search_results", []),
                         target,
                     )
@@ -153,8 +167,8 @@ def _summarize_group(
     for k in k_values:
         clarification_episode_gain[str(k)] = _mean(
             [
-                _hit(result.get("final_results", []), str(result["target_case_id"]), k)
-                - _hit(result.get("baseline_results", []), str(result["target_case_id"]), k)
+                _hit(result.get("final_results", []), _target_title(result), k)
+                - _hit(result.get("baseline_results", []), _target_title(result), k)
                 for result in clarified_results
             ]
         )
@@ -313,7 +327,7 @@ def summarize_results(
         for domain in domains
     }
     return {
-        "schema_version": "2.0",
+        "schema_version": "2.1",
         "metric_config": {
             "k_values": list(normalized_k),
             "max_turns": max_turns,
@@ -321,6 +335,8 @@ def summarize_results(
             "failure_token": FAILED_DONE_TOKEN,
             "success_requires_complete": False,
             "infrastructure_failures_excluded_from_quality_denominators": True,
+            "ground_truth_match_field": "title",
+            "ground_truth_title_source": "case_id resolved from the configured case document",
         },
         "overall": overall,
         "per_domain": per_domain,

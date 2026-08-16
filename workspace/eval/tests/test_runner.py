@@ -86,6 +86,7 @@ SAMPLE = EvaluationSample(
     sample_id="sample-1",
     domain="electronics",
     target_case_id="target",
+    target_case_title="title",
     initial_question="initial question",
     core_intent="intent",
     known_info=("Version 2", "Linux"),
@@ -129,6 +130,8 @@ class EvaluationRunnerTests(unittest.TestCase):
         search_event = result["events"][1]
         self.assertEqual(search_event["clarifications_since_previous_search"], 1)
         self.assertEqual(search_event["pre_clarification_case_ids"], ["baseline-miss"])
+        self.assertEqual(search_event["pre_clarification_case_titles"], ["title"])
+        self.assertEqual(result["target_case_title"], "title")
         self.assertEqual(retriever.calls, [("initial question", 5), ("initial question Version 2", 5)])
 
     def test_search_limit_reuses_latest_results_without_retrieval(self) -> None:
