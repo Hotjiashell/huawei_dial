@@ -11,6 +11,7 @@ from pathlib import Path
 
 import _bootstrap  # noqa: F401
 
+from clarq_eval.clients import SATISFIED_DONE_TOKEN
 from clarq_eval.metrics import summarize_results
 from clarq_eval.models import EvaluationSample, load_samples
 from clarq_eval.reporting import append_jsonl, read_jsonl, render_markdown, write_json, write_report
@@ -50,6 +51,8 @@ def successful_result(sample: EvaluationSample) -> dict:
         "elapsed_seconds": 0.01,
         "judge": None,
         "judge_error": None,
+        "simulator_feedback": SATISFIED_DONE_TOKEN,
+        "satisfaction_judge_called": True,
         "error": None,
     }
 
@@ -147,9 +150,11 @@ class ModelAndReportingTests(unittest.TestCase):
             "elapsed_seconds": 0.5,
             "judge": None,
             "judge_error": None,
+            "simulator_feedback": SATISFIED_DONE_TOKEN,
+            "satisfaction_judge_called": True,
             "error": None,
         }
-        metrics = summarize_results([result], k_values=(1, 3), success_k=1, max_turns=2)
+        metrics = summarize_results([result], k_values=(1, 3), max_turns=2)
         markdown = render_markdown(metrics)
         self.assertIn("Success Rate：100.00%", markdown)
         self.assertIn("| money | 1 / 1 | 0 | 100.00%", markdown)
@@ -157,7 +162,7 @@ class ModelAndReportingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             output_dir = Path(directory)
             append_jsonl(output_dir / "trajectories.jsonl", result)
-            rebuilt = aggregate(output_dir, (1, 3), 1, 2)
+            rebuilt = aggregate(output_dir, (1, 3), 2)
             self.assertEqual(rebuilt["overall"]["result"]["success_rate"], 1.0)
             self.assertTrue((output_dir / "metrics.json").is_file())
             self.assertTrue((output_dir / "report.md").is_file())
@@ -183,7 +188,7 @@ class ModelAndReportingTests(unittest.TestCase):
                 {"trajectory": {"top_k": 1, "max_turns": 2}},
             )
             with self.assertRaisesRegex(ValueError, "only retain Top 1"):
-                aggregate(output_dir, (1, 3), 1, None)
+                aggregate(output_dir, (1, 3), None)
 
     def test_run_config_redacts_secrets_and_resume_checks_signature(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -227,6 +232,10 @@ class ModelAndReportingTests(unittest.TestCase):
             incompatible["trajectory"]["top_k"] = 10
             with self.assertRaises(ValueError):
                 _prepare_output(args, incompatible)
+            legacy = deepcopy(_run_config(args))
+            legacy["schema_version"] = "1.0"
+            with self.assertRaises(ValueError):
+                _prepare_output(args, legacy)
 
     def test_execution_resume_retries_only_latest_failure(self) -> None:
         samples = [
@@ -245,7 +254,6 @@ class ModelAndReportingTests(unittest.TestCase):
                 output_dir=Path(directory),
                 workers=2,
                 k_values=(1, 3, 5),
-                success_k=1,
                 max_turns=2,
             )
             first_runner = FakeEvaluationRunner(failures={"sample-1"})

@@ -5,7 +5,7 @@ from collections import Counter
 from statistics import mean
 from typing import Any, Iterable
 
-from .clients import JUDGE_FIELDS
+from .clients import FAILED_DONE_TOKEN, JUDGE_FIELDS, SATISFIED_DONE_TOKEN
 
 
 def _case_ids(cases: Iterable[dict[str, Any]]) -> list[str]:
@@ -71,19 +71,10 @@ def _executed_search_events(result: dict[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
-def _first_success_turn(result: dict[str, Any], success_k: int) -> int | None:
-    target = str(result["target_case_id"])
-    for event in _executed_search_events(result):
-        if _hit(event.get("search_results", []), target, success_k):
-            return int(event["turn"])
-    return None
-
-
 def _summarize_group(
     results: list[dict[str, Any]],
     *,
     k_values: tuple[int, ...],
-    success_k: int,
     max_turns: int,
 ) -> dict[str, Any]:
     completed = [result for result in results if not result.get("error")]
@@ -119,7 +110,20 @@ def _summarize_group(
     any_search_recall = {
         str(k): _ratio(sum(1 <= rank <= k for rank in best_search_ranks), denominator) for k in k_values
     }
-    final_successes = sum(1 <= rank <= success_k for rank in final_ranks)
+    invalid_feedback = [
+        result.get("simulator_feedback")
+        for result in completed
+        if result.get("simulator_feedback") not in (SATISFIED_DONE_TOKEN, FAILED_DONE_TOKEN)
+    ]
+    if invalid_feedback:
+        raise ValueError(
+            "Completed trajectories must contain simulator_feedback equal to "
+            f"{SATISFIED_DONE_TOKEN!r} or {FAILED_DONE_TOKEN!r}; "
+            "legacy trajectories must be evaluated again"
+        )
+    final_successes = sum(
+        result["simulator_feedback"] == SATISFIED_DONE_TOKEN for result in completed
+    )
 
     clarification_pairs: list[tuple[list[str], list[dict[str, Any]], str]] = []
     for result in completed:
@@ -155,10 +159,15 @@ def _summarize_group(
             ]
         )
 
-    first_success_turns = [_first_success_turn(result, success_k) for result in completed]
+    success_turns = [
+        int(result.get("turn_count", 0))
+        if result["simulator_feedback"] == SATISFIED_DONE_TOKEN
+        else None
+        for result in completed
+    ]
     success_at_turn = {
         str(turn): _ratio(
-            sum(first_turn is not None and first_turn <= turn for first_turn in first_success_turns),
+            sum(success_turn is not None and success_turn <= turn for success_turn in success_turns),
             denominator,
         )
         for turn in range(1, max_turns + 1)
@@ -197,9 +206,19 @@ def _summarize_group(
             "judge_failures": sum(bool(result.get("judge_error")) for result in completed),
         },
         "result": {
-            "success_definition": f"target case is in the final search Top {success_k}",
-            "success_k": success_k,
+            "success_definition": (
+                "training-aligned final case judgment equals <SATISFIED_DONE>; "
+                "Complete is not required"
+            ),
             "success_rate": _ratio(final_successes, denominator),
+            "simulator_feedback_counts": {
+                SATISFIED_DONE_TOKEN: final_successes,
+                FAILED_DONE_TOKEN: denominator - final_successes,
+            },
+            "satisfaction_judge_call_rate": _ratio(
+                sum(bool(result.get("satisfaction_judge_called")) for result in completed),
+                denominator,
+            ),
             "final_recall_at_k": final_recall,
             "baseline_recall_at_k": baseline_recall,
             "first_search_recall_at_k": first_search_recall,
@@ -260,7 +279,7 @@ def _summarize_group(
             "stop_reason_counts": dict(sorted(stop_reasons.items())),
             "normal_completion_rate": _ratio(stop_reasons.get("complete", 0), denominator),
         },
-        "user_satisfaction": judge_summary,
+        "trajectory_judge": judge_summary,
         "confidence_intervals": confidence_intervals,
     }
 
@@ -269,21 +288,19 @@ def summarize_results(
     results: list[dict[str, Any]],
     *,
     k_values: tuple[int, ...] = (1, 3, 5),
-    success_k: int = 1,
     max_turns: int = 6,
 ) -> dict[str, Any]:
     if not results:
         raise ValueError("No evaluation results to aggregate")
     if not k_values or any(k <= 0 for k in k_values):
         raise ValueError("k_values must contain positive integers")
-    if success_k <= 0 or max_turns <= 0:
-        raise ValueError("success_k and max_turns must be positive")
+    if max_turns <= 0:
+        raise ValueError("max_turns must be positive")
 
     normalized_k = tuple(sorted(set(k_values)))
     overall = _summarize_group(
         results,
         k_values=normalized_k,
-        success_k=success_k,
         max_turns=max_turns,
     )
     domains = sorted({str(result.get("domain") or "unknown") for result in results})
@@ -291,17 +308,18 @@ def summarize_results(
         domain: _summarize_group(
             [result for result in results if str(result.get("domain") or "unknown") == domain],
             k_values=normalized_k,
-            success_k=success_k,
             max_turns=max_turns,
         )
         for domain in domains
     }
     return {
-        "schema_version": "1.0",
+        "schema_version": "2.0",
         "metric_config": {
             "k_values": list(normalized_k),
-            "success_k": success_k,
             "max_turns": max_turns,
+            "success_token": SATISFIED_DONE_TOKEN,
+            "failure_token": FAILED_DONE_TOKEN,
+            "success_requires_complete": False,
             "infrastructure_failures_excluded_from_quality_denominators": True,
         },
         "overall": overall,

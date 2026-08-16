@@ -9,7 +9,9 @@
 `clarify_user`、`search_case` 和 `Complete` 之间决策。追问由训练时同款 Qwen3-32B
 模拟用户回答，搜索直接复用
 `workspace/verl_dial-main-h800/examples/clarq_grpo/retriever.py` 的 `CaseRetriever`。
-轨迹完成后可选调用 LLM Judge，最后生成总体及分领域指标。
+轨迹结束后使用训练时完全相同的 case-judge 提示词，只对最后一次 Agent 检索调用一次
+模拟器并取得 `<SATISFIED_DONE>/<FAILED_DONE>`，以此计算 Success；没有得到非空的 Agent
+检索结果则直接失败。之后还可选调用独立的轨迹质量 Judge，最后生成总体及分领域指标。
 
 测试数据默认为 `workspace/ClarQ/profile_split/test`，共 800 条，覆盖 `electronics`、
 `money`、`superuser` 和 `travel` 四个领域。正式指标定义见 [metric.md](metric.md)。
@@ -30,9 +32,10 @@ cp workspace/eval/config.example.env workspace/eval/.env
 必须可访问以下组件：
 
 - 训练后策略模型服务；
-- Qwen3-32B 用户模拟器服务；
+- Qwen3-32B 用户模拟器服务，用于回答追问和必需的终局满意度判定；
 - Elasticsearch 与 embedding 服务；
-- 可选的独立 LLM Judge。未配置时默认复用用户模拟器，使用 `--skip-judge` 可关闭。
+- 可选的独立轨迹质量 Judge。未配置时默认复用用户模拟器，使用 `--skip-judge` 可关闭；
+  该参数不会关闭正式 Success 所需的终局满意度判定。
 
 ## 运行
 
@@ -88,24 +91,25 @@ workspace/eval/run_evaluation.sh \
 不一致，程序会拒绝混写。`errors.jsonl` 保留历史错误用于排查，最终聚合按每个
 `sample_id` 的最新轨迹计算。
 
-已经有轨迹时，可以改变 `success_k` 或 Recall K 后离线重算，不调用任何服务：
+已经有符合当前 schema 的轨迹时，可以改变 Recall K 后离线重算，不调用任何服务：
 
 ```bash
 python3 workspace/eval/evaluate.py \
   --aggregate-only \
   --output-dir workspace/eval/outputs/checkpoint-1000 \
-  --success-k 3 \
   --k-values 1,3,5
 ```
 
 程序会从原运行配置校验已保存的 `top_k`，拒绝计算超出轨迹保留深度的 K；
 `--max-turns` 未指定时也会沿用原运行配置。正常在线运行出现基础设施失败时退出码为 2，质量指标会
 排除这些样本；临时实验可用 `--allow-infrastructure-failures` 允许零退出码，但正式报告应先
-恢复失败样本。
+恢复失败样本。旧版轨迹没有保存 `simulator_feedback`，无法离线推导训练口径的 Success，
+聚合时会明确报错，需要重新执行评估。
 
 ## 产物
 
-- `trajectories.jsonl`：完整对话、工具调用、检索列表、停止原因、耗时和 Judge 结果；
+- `trajectories.jsonl`：完整对话、工具调用、检索列表、停止原因、
+  `<SATISFIED_DONE>/<FAILED_DONE>`、耗时和可选 Judge 结果；
 - `errors.jsonl`：有基础设施失败时生成的错误历史；
 - `metrics.json`：机器可读总体、分领域指标及 Wilson 95% 置信区间；
 - `report.md`：中文汇总报告；

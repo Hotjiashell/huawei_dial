@@ -6,6 +6,7 @@ import time
 from typing import Any, Protocol
 
 from .clients import (
+    FAILED_DONE_TOKEN,
     INVALID_CLARIFICATION_RESPONSE,
     UNKNOWN_CLARIFICATION_RESPONSE,
     OpenAIChatClient,
@@ -223,6 +224,14 @@ class EvaluationRunner:
             call = parsed.tool_calls[0]
             event["action"] = {"type": call.name, "arguments": call.arguments}
 
+            # ToolAgentLoop checks max_assistant_turns before parsing or executing
+            # tool calls from the final allowed assistant turn.
+            if turn_number >= self.max_turns:
+                event["tool_not_executed_due_to_turn_limit"] = True
+                events.append(event)
+                stop_reason = "max_turns"
+                break
+
             if call.name == "clarify_user":
                 question = call.arguments.get("question")
                 if not isinstance(question, str) or not question.strip():
@@ -339,7 +348,7 @@ class EvaluationRunner:
             break
 
         result: dict[str, Any] = {
-            "schema_version": "1.0",
+            "schema_version": "2.0",
             "sample_id": sample.sample_id,
             "domain": sample.domain,
             "target_case_id": sample.target_case_id,
@@ -360,7 +369,7 @@ class EvaluationRunner:
             "search_count": search_count,
             "search_attempt_count": search_attempt_count,
             "protocol_violation_count": sum(len(event.get("violations", [])) for event in events),
-            "elapsed_seconds": time.monotonic() - started_at,
+            "elapsed_seconds": 0.0,
             "runner_config": {
                 "max_turns": self.max_turns,
                 "max_searches": self.max_searches,
@@ -373,6 +382,13 @@ class EvaluationRunner:
             },
             "error": None,
         }
+        if final_results:
+            result["simulator_feedback"] = self.user_simulator.judge_cases(sample, final_results)
+            result["satisfaction_judge_called"] = True
+        else:
+            result["simulator_feedback"] = FAILED_DONE_TOKEN
+            result["satisfaction_judge_called"] = False
+        result["elapsed_seconds"] = time.monotonic() - started_at
         if self.judge is not None:
             try:
                 result["judge"] = self.judge.judge(sample, result)

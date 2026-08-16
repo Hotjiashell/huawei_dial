@@ -87,7 +87,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-searches", type=int, default=int(_env("EVAL_MAX_SEARCHES", "4")))
     parser.add_argument("--top-k", type=int, default=int(top_k_env) if top_k_env else None)
     parser.add_argument("--k-values", type=_csv_ints, default=_csv_ints(_env("EVAL_K_VALUES", "1,3,5")))
-    parser.add_argument("--success-k", type=int, default=int(_env("EVAL_SUCCESS_K", "1")))
     parser.add_argument("--case-content-chars", type=int, default=int(_env("EVAL_CASE_CONTENT_CHARS", "1000")))
     parser.add_argument("--policy-temperature", type=float, default=float(_env("POLICY_TEMPERATURE", "0")))
     parser.add_argument("--policy-max-tokens", type=int, default=int(_env("POLICY_MAX_TOKENS", "512")))
@@ -126,7 +125,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--judge-api-key", default=_env("JUDGE_API_KEY"))
     parser.add_argument("--judge-timeout", type=float, default=float(_env("JUDGE_TIMEOUT", "120")))
     parser.add_argument("--judge-max-retries", type=int, default=int(_env("JUDGE_MAX_RETRIES", "3")))
-    parser.add_argument("--skip-judge", action="store_true")
+    parser.add_argument(
+        "--skip-judge",
+        action="store_true",
+        help="Skip the optional trajectory-quality Judge; final satisfaction judgment remains enabled.",
+    )
 
     parser.add_argument(
         "--search-server-host",
@@ -197,7 +200,6 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "max_turns",
         "max_searches",
         "top_k",
-        "success_k",
         "case_content_chars",
         "policy_max_tokens",
         "policy_max_retries",
@@ -215,7 +217,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         parser.error("--offset must be non-negative")
     if args.limit is not None and args.limit <= 0:
         parser.error("--limit must be positive")
-    required_depth = max((*args.k_values, args.success_k))
+    required_depth = max(args.k_values)
     if not args.aggregate_only and args.top_k < required_depth:
         parser.error(f"--top-k must be at least {required_depth} for the configured metrics")
     if args.aggregate_only and args.check_only:
@@ -343,7 +345,7 @@ def build_components(args: argparse.Namespace) -> tuple[EvaluationRunner, list[t
 
 def _run_config(args: argparse.Namespace) -> dict[str, Any]:
     return {
-        "schema_version": "1.0",
+        "schema_version": "2.0",
         "created_at": datetime.now(timezone.utc).isoformat(),
         "data": {
             "test_root": str(args.test_root),
@@ -361,7 +363,11 @@ def _run_config(args: argparse.Namespace) -> dict[str, Any]:
             "seed": args.seed,
             "enable_thinking": args.policy_enable_thinking,
         },
-        "metrics": {"k_values": list(args.k_values), "success_k": args.success_k},
+        "metrics": {
+            "k_values": list(args.k_values),
+            "success_definition": "simulator_feedback == <SATISFIED_DONE>",
+            "success_requires_complete": False,
+        },
         "services": {
             "policy": {"base_url": _redact_url(args.policy_base_url), "model": args.policy_model},
             "user_simulator": {
@@ -386,14 +392,21 @@ def _run_config(args: argparse.Namespace) -> dict[str, Any]:
             "rrf_title_vector_weight": args.rrf_title_vector_weight,
             "rrf_answer_vector_weight": args.rrf_answer_vector_weight,
         },
-        "execution": {"workers": args.workers, "judge_enabled": not args.skip_judge},
+        "execution": {
+            "workers": args.workers,
+            "final_satisfaction_judge_enabled": True,
+            "trajectory_judge_enabled": not args.skip_judge,
+        },
     }
 
 
 def _resume_signature(config: dict[str, Any]) -> dict[str, Any]:
     return {
-        key: config.get(key)
-        for key in ("data", "trajectory", "services", "retrieval")
+        "schema_version": config.get("schema_version"),
+        "data": config.get("data"),
+        "trajectory": config.get("trajectory"),
+        "services": config.get("services"),
+        "retrieval": config.get("retrieval"),
     }
 
 
@@ -434,7 +447,7 @@ def latest_records(records: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
 
 def _error_record(sample: EvaluationSample, error: Exception, elapsed_seconds: float) -> dict[str, Any]:
     return {
-        "schema_version": "1.0",
+        "schema_version": "2.0",
         "sample_id": sample.sample_id,
         "domain": sample.domain,
         "target_case_id": sample.target_case_id,
@@ -449,6 +462,8 @@ def _error_record(sample: EvaluationSample, error: Exception, elapsed_seconds: f
         "clarification_count": 0,
         "search_count": 0,
         "elapsed_seconds": elapsed_seconds,
+        "simulator_feedback": None,
+        "satisfaction_judge_called": False,
         "judge": None,
         "judge_error": None,
         "error": {"type": type(error).__name__, "message": str(error)},
@@ -487,7 +502,6 @@ def preflight(
 def aggregate(
     output_dir: Path,
     k_values: tuple[int, ...],
-    success_k: int,
     max_turns: int | None,
 ) -> dict[str, Any]:
     trajectory_path = output_dir / "trajectories.jsonl"
@@ -509,7 +523,7 @@ def aggregate(
         ]
         stored_depths = [int(depth) for depth in stored_depths if depth is not None]
         stored_top_k = min(stored_depths) if stored_depths else None
-    required_depth = max((*k_values, success_k))
+    required_depth = max(k_values)
     if stored_top_k is not None and required_depth > int(stored_top_k):
         raise ValueError(
             f"Cannot compute K={required_depth}: stored trajectories only retain Top {stored_top_k}"
@@ -528,7 +542,6 @@ def aggregate(
     metrics = summarize_results(
         records,
         k_values=k_values,
-        success_k=success_k,
         max_turns=int(max_turns),
     )
     write_json(output_dir / "metrics.json", metrics)
@@ -582,7 +595,6 @@ def run_evaluation(
     metrics = summarize_results(
         selected_records,
         k_values=args.k_values,
-        success_k=args.success_k,
         max_turns=args.max_turns,
     )
     write_json(args.output_dir / "metrics.json", metrics)
@@ -593,7 +605,7 @@ def run_evaluation(
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     if args.aggregate_only:
-        metrics = aggregate(args.output_dir, args.k_values, args.success_k, args.max_turns)
+        metrics = aggregate(args.output_dir, args.k_values, args.max_turns)
         print(f"Aggregated {metrics['overall']['sample_counts']['requested']} latest trajectories")
         print(f"Report: {args.output_dir / 'report.md'}")
         if (

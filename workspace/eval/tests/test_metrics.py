@@ -2,7 +2,7 @@ import unittest
 
 import _bootstrap  # noqa: F401
 
-from clarq_eval.clients import JUDGE_FIELDS
+from clarq_eval.clients import FAILED_DONE_TOKEN, JUDGE_FIELDS, SATISFIED_DONE_TOKEN
 from clarq_eval.metrics import summarize_results
 
 
@@ -27,6 +27,8 @@ def result_template(sample_id: str, target: str) -> dict:
         "elapsed_seconds": 1.0,
         "judge": None,
         "judge_error": None,
+        "simulator_feedback": FAILED_DONE_TOKEN,
+        "satisfaction_judge_called": True,
         "error": None,
     }
 
@@ -53,6 +55,7 @@ class MetricTests(unittest.TestCase):
         first["judge"].update(
             {"final_cases_satisfy_intent": True, "overall_satisfied": True, "score": 4, "reason": "good"}
         )
+        first["simulator_feedback"] = SATISFIED_DONE_TOKEN
 
         second = result_template("second", "target-b")
         second["baseline_results"] = [{"case_id": "target-b"}]
@@ -78,7 +81,6 @@ class MetricTests(unittest.TestCase):
         metrics = summarize_results(
             [first, second, failure],
             k_values=(1, 3, 5),
-            success_k=1,
             max_turns=3,
         )
         overall = metrics["overall"]
@@ -95,10 +97,38 @@ class MetricTests(unittest.TestCase):
             1,
         )
         self.assertEqual(overall["efficiency"]["success_at_turn"], {"1": 0.0, "2": 0.5, "3": 0.5})
-        self.assertEqual(overall["user_satisfaction"]["coverage"], 0.5)
-        self.assertEqual(overall["user_satisfaction"]["mean_score"], 4)
-        self.assertEqual(overall["user_satisfaction"]["overall_satisfied_rate"], 1.0)
+        self.assertEqual(overall["trajectory_judge"]["coverage"], 0.5)
+        self.assertEqual(overall["trajectory_judge"]["mean_score"], 4)
+        self.assertEqual(overall["trajectory_judge"]["overall_satisfied_rate"], 1.0)
         self.assertEqual(overall["sample_counts"]["judge_failures"], 1)
+
+    def test_success_is_independent_of_gt_hit_and_complete(self) -> None:
+        satisfied_gt_miss = result_template("satisfied", "target")
+        satisfied_gt_miss["final_results"] = [{"case_id": "other"}]
+        satisfied_gt_miss["simulator_feedback"] = SATISFIED_DONE_TOKEN
+        satisfied_gt_miss["stop_reason"] = "unexpected_text"
+        satisfied_gt_miss["turn_count"] = 2
+
+        failed_gt_hit = result_template("failed", "target")
+        failed_gt_hit["final_results"] = [{"case_id": "target"}]
+        failed_gt_hit["simulator_feedback"] = FAILED_DONE_TOKEN
+        failed_gt_hit["turn_count"] = 1
+
+        overall = summarize_results(
+            [satisfied_gt_miss, failed_gt_hit],
+            k_values=(1,),
+            max_turns=3,
+        )["overall"]
+
+        self.assertEqual(overall["result"]["success_rate"], 0.5)
+        self.assertEqual(overall["result"]["final_recall_at_k"]["1"], 0.5)
+        self.assertEqual(overall["efficiency"]["success_at_turn"], {"1": 0.0, "2": 0.5, "3": 0.5})
+
+    def test_missing_training_feedback_is_rejected(self) -> None:
+        result = result_template("legacy", "target")
+        result.pop("simulator_feedback")
+        with self.assertRaisesRegex(ValueError, "legacy trajectories"):
+            summarize_results([result])
 
     def test_validation(self) -> None:
         with self.assertRaises(ValueError):

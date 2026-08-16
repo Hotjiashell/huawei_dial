@@ -69,9 +69,10 @@ def render_markdown(metrics: dict[str, Any]) -> str:
         "",
         "## 评估口径",
         "",
-        f"- Success Rate：最终一次检索 Top {config['success_k']} 命中 GT 案例。",
+        "- Success Rate：轨迹结束后的训练同款 case judge 返回 `<SATISFIED_DONE>`；不要求输出 `Complete`。",
         "- Recall@K：GT 案例位于对应检索结果前 K 名。",
-        "- Success@Turn N：截至第 N 次策略决策，任意一次检索已在 Success K 内命中 GT。",
+        "- Success@Turn N：最终判定成功，且训练状态机在第 N 次策略决策内结束。",
+        "- 没有非空的 Agent 检索结果时直接返回 `<FAILED_DONE>`，不调用终局 case judge。",
         "- 追问增益：追问前最近检索（没有则为原始问题 baseline）与追问后首次检索的 Recall@K 差值。",
         "- 基础设施失败不进入质量指标分母，单独报告失败数量。",
         "",
@@ -80,9 +81,14 @@ def render_markdown(metrics: dict[str, Any]) -> str:
         f"- 请求样本：{overall['sample_counts']['requested']}",
         f"- 完成样本：{overall['sample_counts']['completed']}",
         f"- 基础设施失败：{overall['sample_counts']['infrastructure_failures']}",
-        f"- Judge 失败：{overall['sample_counts']['judge_failures']}",
+        f"- 可选轨迹 Judge 失败：{overall['sample_counts']['judge_failures']}",
         f"- Success Rate：{_fmt(overall['result']['success_rate'], percent=True)}"
         f"（Wilson 95% CI {_fmt_ci(overall['confidence_intervals']['success_rate'])}）",
+        f"- `<SATISFIED_DONE>` / `<FAILED_DONE>`："
+        f"{overall['result']['simulator_feedback_counts']['<SATISFIED_DONE>']} / "
+        f"{overall['result']['simulator_feedback_counts']['<FAILED_DONE>']}",
+        f"- 终局 case judge 调用率："
+        f"{_fmt(overall['result']['satisfaction_judge_call_rate'], percent=True)}",
         f"- 未执行 Agent 检索率：{_fmt(overall['result']['no_agent_search_rate'], percent=True)}",
         f"- 最终检索空结果率：{_fmt(overall['result']['empty_final_search_rate'], percent=True)}",
         "",
@@ -151,11 +157,11 @@ def render_markdown(metrics: dict[str, Any]) -> str:
     for reason, count in efficiency["stop_reason_counts"].items():
         lines.append(f"| {reason} | {count} |")
 
-    satisfaction = overall["user_satisfaction"]
+    satisfaction = overall["trajectory_judge"]
     lines.extend(
         [
             "",
-            "## 用户满意度 Judge",
+            "## 可选轨迹质量 Judge",
             "",
             f"- Judge 覆盖率：{_fmt(satisfaction['coverage'], percent=True)}",
             f"- 平均评分：{_fmt(satisfaction['mean_score'])} / 5",
