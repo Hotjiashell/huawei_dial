@@ -57,9 +57,7 @@ class MetricTests(unittest.TestCase):
         first["clarification_count"] = 1
         first["useful_clarification_count"] = 1
         first["judge"] = {field: False for field in JUDGE_FIELDS}
-        first["judge"].update(
-            {"final_cases_satisfy_intent": True, "overall_satisfied": True, "score": 4, "reason": "good"}
-        )
+        first["judge"].update({"score": 4, "reason": "good"})
         first["simulator_feedback"] = SATISFIED_DONE_TOKEN
 
         second = result_template("second", "target-b")
@@ -104,7 +102,9 @@ class MetricTests(unittest.TestCase):
         self.assertEqual(overall["efficiency"]["success_at_turn"], {"1": 0.0, "2": 0.5, "3": 0.5})
         self.assertEqual(overall["trajectory_judge"]["coverage"], 0.5)
         self.assertEqual(overall["trajectory_judge"]["mean_score"], 4)
-        self.assertEqual(overall["trajectory_judge"]["overall_satisfied_rate"], 1.0)
+        self.assertNotIn("premature_completion_rate", overall["trajectory_judge"])
+        self.assertNotIn("final_cases_satisfy_intent_rate", overall["trajectory_judge"])
+        self.assertNotIn("overall_satisfied_rate", overall["trajectory_judge"])
         self.assertEqual(overall["sample_counts"]["judge_failures"], 1)
 
     def test_success_is_independent_of_gt_hit_and_complete(self) -> None:

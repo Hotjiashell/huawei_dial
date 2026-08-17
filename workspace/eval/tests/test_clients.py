@@ -10,6 +10,7 @@ from clarq_eval.clients import (
     FAILED_DONE_TOKEN,
     SATISFIED_DONE_TOKEN,
     ChatAPIError,
+    TrajectoryJudge,
     UserSimulator,
 )
 from clarq_eval.models import EvaluationSample
@@ -90,6 +91,36 @@ class UserSimulatorTests(unittest.TestCase):
 
         self.assertEqual(simulator.judge_cases(SAMPLE, []), FAILED_DONE_TOKEN)
         self.assertEqual(client.calls, [])
+
+
+class TrajectoryJudgeTests(unittest.TestCase):
+    def test_prompt_excludes_final_retrieved_cases(self) -> None:
+        client = FakeChatClient(
+            content=(
+                '{"irrelevant_question": false, "repeated_question": false, '
+                '"unclear_question": false, "nonstandard_language": false, '
+                '"score": 4, "reason": "good"}'
+            )
+        )
+        result = {
+            "events": [
+                {
+                    "turn": 1,
+                    "action": {"type": "search_case", "query": "query"},
+                    "search_results": [{"rank": 1, "case_id": "case-1", "title": "Case title"}],
+                }
+            ],
+            "final_results": [
+                {"case_id": "case-1", "title": "Case title", "content": "final case content"}
+            ],
+        }
+
+        judgment = TrajectoryJudge(client).judge(SAMPLE, result)
+
+        self.assertEqual(judgment["score"], 4)
+        prompt = client.calls[0][0][0]["content"]
+        self.assertNotIn("Final retrieved cases", prompt)
+        self.assertNotIn("final case content", prompt)
 
 
 if __name__ == "__main__":
