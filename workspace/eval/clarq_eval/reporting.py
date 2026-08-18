@@ -69,7 +69,7 @@ def render_markdown(metrics: dict[str, Any]) -> str:
         "",
         "## 评估口径",
         "",
-        "- Success Rate：轨迹结束后的训练同款 case judge 返回 `<SATISFIED_DONE>`；不要求输出 `Complete`。",
+        "- Success Rate：终局 case judge 返回 `<SATISFIED_DONE>`，或标准案例 title 位于最终检索 Top-5；不要求输出 `Complete`。",
         "- Recall@K：标准案例的 title 位于对应检索结果前 K 名；标准 title 由测试样本的 case_id 从案例文档解析得到。",
         "- Success@Turn N：最终判定成功，且训练状态机在第 N 次策略决策内结束。",
         "- 没有非空的 Agent 检索结果时直接返回 `<FAILED_DONE>`，不调用终局 case judge。",

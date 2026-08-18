@@ -39,7 +39,7 @@ Recall_s@K = \frac{1}{N}\sum_{i=1}^{N}\mathbb{1}[rank_s(g_i)\le K]
 
 ### Success Rate
 
-Success 完全复用训练时的满意度奖励口径。Agent 轨迹结束后：
+Success 结合训练同款的终局满意度判定与最终检索的 Top-5 召回。Agent 轨迹结束后：
 
 - 如果 Agent 没有执行过 `search_case`，或者最后一次真实检索结果为空，直接记为
   `<FAILED_DONE>`，不调用模型；
@@ -49,18 +49,18 @@ Success 完全复用训练时的满意度奖励口径。Agent 轨迹结束后：
 - 每条轨迹只进行这一次终局判定，不在每轮或每次检索后调用；
 - 不要求策略以严格文本 `Complete` 结束。`Complete` 率作为独立的协议/效率指标报告。
 
-令终局反馈为 $f_i$：
+令终局反馈为 $f_i$，$r_i$ 为标准案例 title 在最终检索结果中的排名（未命中时为 0）：
 
 \[
 SuccessRate = \frac{1}{N}\sum_{i=1}^{N}
-\mathbb{1}[f_i=\texttt{<SATISFIED\_DONE>}]
+\mathbb{1}[f_i=\texttt{<SATISFIED\_DONE>} \lor 1\le r_i\le5]
 \]
 
 模拟器返回空字符串、非法选项或 HTTP 400 时，与训练一致回退为 `<FAILED_DONE>`；其他服务
-错误按基础设施失败处理。标准 title 是否命中不参与 Success 判定，只用于下方的
-Recall@K、MRR 和追问增益；测试数据中的 `case_id` 只用于解析标准 title 和轨迹审计。
-因此，可能出现“GT title 未命中但 judge 满意”或“GT title 命中但 judge 不满意”，报告会
-如实保留这两组信号。标准 title 解析失败时样本不能进入在线评估；缺少
+错误按基础设施失败处理。最终 Top-5 的标准 title 命中会使样本成功，即使 judge 返回
+`<FAILED_DONE>`；相反，judge 返回 `<SATISFIED_DONE>` 时，即使 GT title 未命中也成功。
+Recall@K、MRR 和追问增益仍单独报告。测试数据中的 `case_id` 只用于解析标准 title 和轨迹审计。
+标准 title 解析失败时样本不能进入在线评估；缺少
 `target_case_title` 的旧轨迹不能按新口径离线聚合。
 
 ### MRR
@@ -123,10 +123,10 @@ Recall@K。连续追问只产生一个区间，避免把同一次检索收益重
 
 \[
 Success@Turn(N) = \frac{1}{N_{samples}}\sum_i
-\mathbb{1}[f_i=\texttt{<SATISFIED\_DONE>} \land t_i\le N]
+\mathbb{1}[(f_i=\texttt{<SATISFIED\_DONE>} \lor 1\le r_i\le5) \land t_i\le N]
 \]
 
-这是累计指标：在第 $N$ 轮内结束且终局满意的样本，会计入第 $N$ 轮及其后的所有轮次。
+这是累计指标：在第 $N$ 轮内结束且满足 Success 条件的样本，会计入第 $N$ 轮及其后的所有轮次。
 它不会为了计算不同的 $N$ 重复调用 case judge。默认报告第 1 到第 6 轮；最后一轮的
 `Success@Turn` 应等于总体 Success Rate。
 

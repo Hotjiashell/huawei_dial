@@ -121,6 +121,8 @@ class TrajectoryJudgeTests(unittest.TestCase):
         prompt = client.calls[0][0][0]["content"]
         self.assertNotIn("Final retrieved cases", prompt)
         self.assertNotIn("final case content", prompt)
+        self.assertIn("Return exactly one valid JSON object", prompt)
+        self.assertIn('"reason": "A brief justification based only on the trajectory."', prompt)
 
 
 if __name__ == "__main__":

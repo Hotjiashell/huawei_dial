@@ -35,7 +35,7 @@ def result_template(sample_id: str, target: str) -> dict:
 
 
 class MetricTests(unittest.TestCase):
-    def test_recall_gain_success_turn_judge_and_failure_denominator(self) -> None:
+    def test_recall_gain_success_turn_and_top_five_fallback(self) -> None:
         first = result_template("first", "target-a")
         first["baseline_results"] = [{"case_id": "miss"}]
         first["final_results"] = [
@@ -91,7 +91,11 @@ class MetricTests(unittest.TestCase):
         self.assertEqual(overall["sample_counts"]["requested"], 3)
         self.assertEqual(overall["sample_counts"]["completed"], 2)
         self.assertEqual(overall["sample_counts"]["infrastructure_failures"], 1)
-        self.assertEqual(overall["result"]["success_rate"], 0.5)
+        self.assertEqual(overall["result"]["success_rate"], 1.0)
+        self.assertEqual(
+            overall["result"]["simulator_feedback_counts"],
+            {SATISFIED_DONE_TOKEN: 1, FAILED_DONE_TOKEN: 1},
+        )
         self.assertEqual(overall["result"]["final_recall_at_k"], {"1": 0.5, "3": 1.0, "5": 1.0})
         self.assertEqual(overall["result"]["baseline_recall_at_k"]["1"], 0.5)
         self.assertEqual(overall["process"]["clarification_gain_at_k"]["1"], 1)
@@ -99,7 +103,7 @@ class MetricTests(unittest.TestCase):
             overall["process"]["clarified_episode_final_vs_baseline_gain_at_k"]["1"],
             1,
         )
-        self.assertEqual(overall["efficiency"]["success_at_turn"], {"1": 0.0, "2": 0.5, "3": 0.5})
+        self.assertEqual(overall["efficiency"]["success_at_turn"], {"1": 0.5, "2": 1.0, "3": 1.0})
         self.assertEqual(overall["trajectory_judge"]["coverage"], 0.5)
         self.assertEqual(overall["trajectory_judge"]["mean_score"], 4)
         self.assertNotIn("premature_completion_rate", overall["trajectory_judge"])
@@ -107,7 +111,7 @@ class MetricTests(unittest.TestCase):
         self.assertNotIn("overall_satisfied_rate", overall["trajectory_judge"])
         self.assertEqual(overall["sample_counts"]["judge_failures"], 1)
 
-    def test_success_is_independent_of_gt_hit_and_complete(self) -> None:
+    def test_success_accepts_satisfaction_or_final_top_five_hit(self) -> None:
         satisfied_gt_miss = result_template("satisfied", "target")
         satisfied_gt_miss["final_results"] = [{"case_id": "other", "title": "other-title"}]
         satisfied_gt_miss["simulator_feedback"] = SATISFIED_DONE_TOKEN
@@ -125,9 +129,27 @@ class MetricTests(unittest.TestCase):
             max_turns=3,
         )["overall"]
 
-        self.assertEqual(overall["result"]["success_rate"], 0.5)
+        self.assertEqual(overall["result"]["success_rate"], 1.0)
         self.assertEqual(overall["result"]["final_recall_at_k"]["1"], 0.5)
-        self.assertEqual(overall["efficiency"]["success_at_turn"], {"1": 0.0, "2": 0.5, "3": 0.5})
+        self.assertEqual(overall["efficiency"]["success_at_turn"], {"1": 0.5, "2": 1.0, "3": 1.0})
+
+    def test_final_rank_five_succeeds_but_rank_six_does_not(self) -> None:
+        rank_five = result_template("rank-five", "target-five")
+        rank_five["final_results"] = [
+            *[{"case_id": f"miss-{index}", "title": f"miss-{index}"} for index in range(1, 5)],
+            {"case_id": "target-five", "title": "title-target-five"},
+        ]
+
+        rank_six = result_template("rank-six", "target-six")
+        rank_six["final_results"] = [
+            *[{"case_id": f"miss-{index}", "title": f"miss-{index}"} for index in range(1, 6)],
+            {"case_id": "target-six", "title": "title-target-six"},
+        ]
+
+        overall = summarize_results([rank_five, rank_six], k_values=(1,), max_turns=2)["overall"]
+
+        self.assertEqual(overall["result"]["final_recall_at_k"]["1"], 0.0)
+        self.assertEqual(overall["result"]["success_rate"], 0.5)
 
     def test_missing_training_feedback_is_rejected(self) -> None:
         result = result_template("legacy", "target")

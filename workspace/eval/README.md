@@ -10,8 +10,9 @@
 模拟用户回答，搜索直接复用
 `workspace/verl_dial-main-h800/examples/clarq_grpo/retriever.py` 的 `CaseRetriever`。
 轨迹结束后使用训练时完全相同的 case-judge 提示词，只对最后一次 Agent 检索调用一次
-模拟器并取得 `<SATISFIED_DONE>/<FAILED_DONE>`，以此计算 Success；没有得到非空的 Agent
-检索结果则直接失败。之后还可选调用独立的轨迹质量 Judge，最后生成总体及分领域指标。
+模拟器并取得 `<SATISFIED_DONE>/<FAILED_DONE>`。Success 满足以下任一条件即可：终局结果为
+`<SATISFIED_DONE>`，或最终检索的 Top-5 命中标准案例 title；没有得到非空的 Agent 检索结果
+则直接失败。之后还可选调用独立的轨迹质量 Judge，最后生成总体及分领域指标。
 
 测试数据默认为 `workspace/ClarQ/profile_split/test`，共 800 条，覆盖 `electronics`、
 `money`、`superuser` 和 `travel` 四个领域。测试样本中的 `case_id` 会在评估启动时从

@@ -8,6 +8,9 @@ from typing import Any, Iterable
 from .clients import FAILED_DONE_TOKEN, JUDGE_FIELDS, SATISFIED_DONE_TOKEN
 
 
+SUCCESS_RECALL_K = 5
+
+
 def _case_titles(cases: Iterable[dict[str, Any]]) -> list[str]:
     return [str(case.get("title") or "").strip() for case in cases]
 
@@ -135,9 +138,15 @@ def _summarize_group(
             f"{SATISFIED_DONE_TOKEN!r} or {FAILED_DONE_TOKEN!r}; "
             "legacy trajectories must be evaluated again"
         )
-    final_successes = sum(
+    satisfaction_successes = [
         result["simulator_feedback"] == SATISFIED_DONE_TOKEN for result in completed
-    )
+    ]
+    top_five_hits = [1 <= rank <= SUCCESS_RECALL_K for rank in final_ranks]
+    success_flags = [
+        satisfied or top_five_hit
+        for satisfied, top_five_hit in zip(satisfaction_successes, top_five_hits)
+    ]
+    final_successes = sum(success_flags)
 
     clarification_pairs: list[tuple[list[str], list[dict[str, Any]], str]] = []
     for result in completed:
@@ -175,9 +184,9 @@ def _summarize_group(
 
     success_turns = [
         int(result.get("turn_count", 0))
-        if result["simulator_feedback"] == SATISFIED_DONE_TOKEN
+        if is_success
         else None
-        for result in completed
+        for result, is_success in zip(completed, success_flags)
     ]
     success_at_turn = {
         str(turn): _ratio(
@@ -221,13 +230,14 @@ def _summarize_group(
         },
         "result": {
             "success_definition": (
-                "training-aligned final case judgment equals <SATISFIED_DONE>; "
+                "training-aligned final case judgment equals <SATISFIED_DONE> or "
+                f"the ground-truth title is in the final top-{SUCCESS_RECALL_K}; "
                 "Complete is not required"
             ),
             "success_rate": _ratio(final_successes, denominator),
             "simulator_feedback_counts": {
-                SATISFIED_DONE_TOKEN: final_successes,
-                FAILED_DONE_TOKEN: denominator - final_successes,
+                SATISFIED_DONE_TOKEN: sum(satisfaction_successes),
+                FAILED_DONE_TOKEN: denominator - sum(satisfaction_successes),
             },
             "satisfaction_judge_call_rate": _ratio(
                 sum(bool(result.get("satisfaction_judge_called")) for result in completed),
@@ -327,12 +337,13 @@ def summarize_results(
         for domain in domains
     }
     return {
-        "schema_version": "2.1",
+        "schema_version": "2.2",
         "metric_config": {
             "k_values": list(normalized_k),
             "max_turns": max_turns,
             "success_token": SATISFIED_DONE_TOKEN,
             "failure_token": FAILED_DONE_TOKEN,
+            "success_recall_k": SUCCESS_RECALL_K,
             "success_requires_complete": False,
             "infrastructure_failures_excluded_from_quality_denominators": True,
             "ground_truth_match_field": "title",
