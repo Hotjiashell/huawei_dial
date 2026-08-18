@@ -16,6 +16,7 @@ No third-party Python package is required.
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 import json
 import os
 import re
@@ -445,58 +446,105 @@ def aggregate_results(dialogue_results: Sequence[Mapping[str, Any]]) -> dict[str
     }
 
 
+def evaluate_one_dialogue(record_index: int, record: Mapping[str, Any], judge: LLMJudge) -> dict[str, Any]:
+    """Evaluate one record and return its source-aligned result."""
+
+    turns = parse_turns(record.get("chat_content", record.get("conversation", record.get("messages", ""))))
+    raw_judgement = judge.evaluate(turns) if turns else {"clarification_pairs": []}
+    normalized = normalize_judgement(raw_judgement, turns)
+    # The model returns answered pairs; question count is kept separately for
+    # the useful denominator in answer-rate analyses. It is inferred only from
+    # assistant turns that the judge identified as clarifications.
+    question_indices = {p["question_turn_index"] for p in normalized["clarification_pairs"]}
+    return {
+        "record_index": record_index,
+        "call_sno": record.get("call_sno"),
+        "turns": [turn.as_dict() for turn in turns],
+        "clarification_question_count": len(question_indices),
+        **normalized,
+    }
+
+
+def _error_record(record_index: int, record: Mapping[str, Any], exc: Exception) -> dict[str, Any]:
+    return {
+        "record_index": record_index,
+        "call_sno": record.get("call_sno"),
+        "error_type": type(exc).__name__,
+        "error": str(exc),
+    }
+
+
 def evaluate_dialogues(
     dialogues: Sequence[Mapping[str, Any]],
     judge: LLMJudge,
     *,
     skip_errors: bool = True,
+    workers: int = 4,
     progress_callback: Callable[[int, int, str, Mapping[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """Evaluate all dialogues.
 
     ``skip_errors=True`` keeps a single failed LLM request from discarding the
     whole batch. Failed records are retained in ``errors`` with their source
-    index/call number and an error message. ``progress_callback`` is called
+    index/call number and an error message. ``workers`` controls the maximum
+    number of simultaneous Judge requests. ``progress_callback`` is called
     with ``started``, ``completed`` or ``failed`` for each record and is kept
     optional so this function remains quiet when used as a Python module.
     """
 
-    results: list[dict[str, Any]] = []
+    if workers < 1:
+        raise ValueError("workers must be at least 1")
+
+    results_by_index: dict[int, dict[str, Any]] = {}
     errors: list[dict[str, Any]] = []
     total = len(dialogues)
-    for record_index, record in enumerate(dialogues):
-        if progress_callback:
-            progress_callback(record_index, total, "started", record)
-        try:
-            turns = parse_turns(record.get("chat_content", record.get("conversation", record.get("messages", ""))))
-            raw_judgement = judge.evaluate(turns) if turns else {"clarification_pairs": []}
-            normalized = normalize_judgement(raw_judgement, turns)
-            # The model returns answered pairs; question count is kept separately
-            # for the useful denominator in answer-rate analyses. It is inferred
-            # only from assistant turns that the judge identified as clarifications.
-            question_indices = {p["question_turn_index"] for p in normalized["clarification_pairs"]}
-            result = {
-                "record_index": record_index,
-                "call_sno": record.get("call_sno"),
-                "turns": [turn.as_dict() for turn in turns],
-                "clarification_question_count": len(question_indices),
-                **normalized,
-            }
-            results.append(result)
+    if workers == 1 or total <= 1:
+        for record_index, record in enumerate(dialogues):
             if progress_callback:
-                progress_callback(record_index, total, "completed", result)
-        except Exception as exc:  # noqa: BLE001 - batch mode intentionally isolates records
-            error = {
-                "record_index": record_index,
-                "call_sno": record.get("call_sno"),
-                "error_type": type(exc).__name__,
-                "error": str(exc),
-            }
-            errors.append(error)
-            if progress_callback:
-                progress_callback(record_index, total, "failed", error)
-            if not skip_errors:
-                raise
+                progress_callback(record_index, total, "started", record)
+            try:
+                result = evaluate_one_dialogue(record_index, record, judge)
+                results_by_index[record_index] = result
+                if progress_callback:
+                    progress_callback(record_index, total, "completed", result)
+            except Exception as exc:  # noqa: BLE001 - batch mode intentionally isolates records
+                error = _error_record(record_index, record, exc)
+                errors.append(error)
+                if progress_callback:
+                    progress_callback(record_index, total, "failed", error)
+                if not skip_errors:
+                    raise
+    else:
+        # The Judge client contains no request-specific mutable state, so it is
+        # safe to share between workers. Result collection happens in the main
+        # thread; this keeps callback calls and final output deterministic.
+        futures: dict[Future[dict[str, Any]], tuple[int, Mapping[str, Any]]] = {}
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="llm-judge") as executor:
+            for record_index, record in enumerate(dialogues):
+                if progress_callback:
+                    progress_callback(record_index, total, "started", record)
+                future = executor.submit(evaluate_one_dialogue, record_index, record, judge)
+                futures[future] = (record_index, record)
+
+            for future in as_completed(futures):
+                record_index, record = futures[future]
+                try:
+                    result = future.result()
+                    results_by_index[record_index] = result
+                    if progress_callback:
+                        progress_callback(record_index, total, "completed", result)
+                except Exception as exc:  # noqa: BLE001 - batch mode intentionally isolates records
+                    error = _error_record(record_index, record, exc)
+                    errors.append(error)
+                    if progress_callback:
+                        progress_callback(record_index, total, "failed", error)
+                    if not skip_errors:
+                        for pending in futures:
+                            pending.cancel()
+                        raise
+
+    results = [results_by_index[index] for index in sorted(results_by_index)]
+    errors.sort(key=lambda item: int(item["record_index"]))
     summary = aggregate_results(results)
     summary["dialogue_count"] = total
     summary["successful_dialogue_count"] = len(results)
@@ -514,6 +562,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output", help="Output JSON path; defaults to stdout")
     parser.add_argument("--timeout", type=float, default=60.0, help="HTTP timeout in seconds (default: 60)")
     parser.add_argument("--max-retries", type=int, default=2, help="Retries per request (default: 2)")
+    parser.add_argument("--workers", "--concurrency", dest="workers", type=int, default=4, help="Maximum simultaneous Judge requests (default: 4; use 1 for serial)")
     parser.add_argument("--fail-fast", action="store_true", help="Stop at the first failed dialogue instead of skipping it")
     parser.add_argument("--no-progress", action="store_true", help="Disable per-dialogue progress output on stderr")
     return parser
@@ -526,26 +575,38 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error("--url is required (or set LLM_JUDGE_URL)")
     if not args.model_name:
         parser.error("--model-name is required (or set LLM_JUDGE_MODEL_NAME)")
+    if args.workers < 1:
+        parser.error("--workers must be at least 1")
     try:
         dialogues = load_dialogues(args.input)
         judge = LLMJudge(args.url, args.model_name, args.api_key, args.timeout, args.max_retries)
 
+        completed_count = 0
+
         def print_progress(index: int, total: int, status: str, item: Mapping[str, Any]) -> None:
+            nonlocal completed_count
             if args.no_progress:
                 return
             call_sno = item.get("call_sno", item.get("record_index", index))
             if status == "started":
-                detail = "评估中"
+                detail = "已提交"
             elif status == "completed":
+                completed_count += 1
                 detail = f"完成，澄清回答 {len(item.get('clarification_pairs', []))} 次"
             else:
+                completed_count += 1
                 detail = f"失败（{item.get('error_type', 'Error')}: {item.get('error', '')}）"
-            print(f"[clarification-eval] {index + 1}/{total} ({(index + 1) / total:.1%}) call_sno={call_sno} {detail}", file=sys.stderr, flush=True)
+            if status == "started":
+                progress = f"已提交 {index + 1}/{total}"
+            else:
+                progress = f"已完成 {completed_count}/{total} ({completed_count / total:.1%})"
+            print(f"[clarification-eval] {progress} call_sno={call_sno} {detail}", file=sys.stderr, flush=True)
 
         report = evaluate_dialogues(
             dialogues,
             judge,
             skip_errors=not args.fail_fast,
+            workers=args.workers,
             progress_callback=print_progress,
         )
     except (OSError, ValueError, RuntimeError) as exc:

@@ -42,11 +42,15 @@ python3 clarification_eval.py diveUserData/dialog.json
 回退到普通请求。网络失败或服务返回非 JSON 时会重试；可用 `--timeout` 和
 `--max-retries` 调整。
 
-运行时会在 stderr 显示每条对话的开始、完成或失败进度，例如：
+默认最多同时发起 4 个 Judge 请求；可用 `--workers N`（或 `--concurrency N`）调整，
+例如 `--workers 8`。传入 `--workers 1` 时退回串行。即使并发完成顺序不同，最终
+`dialogues` 和 `errors` 仍按原始输入顺序输出。
+
+运行时会在 stderr 显示每条对话的提交、完成或失败进度，例如：
 
 ```text
-[clarification-eval] 12/100 (12.0%) call_sno=103 评估中
-[clarification-eval] 12/100 (12.0%) call_sno=103 完成，澄清回答 1 次
+[clarification-eval] 已提交 12/100 call_sno=103 已提交
+[clarification-eval] 已完成 12/100 (12.0%) call_sno=103 完成，澄清回答 1 次
 ```
 
 默认单条 Judge 请求、数据解析或 Judge 输出异常时，会记录该条错误并继续评估其他对话；
@@ -120,4 +124,10 @@ judge = LLMJudge(
 )
 report = evaluate_dialogues(dialogues, judge)
 print(report["summary"])
+```
+
+Python 调用时同样可以指定并发数：
+
+```python
+report = evaluate_dialogues(dialogues, judge, workers=8)
 ```
