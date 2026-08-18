@@ -43,13 +43,14 @@ python3 clarification_eval.py diveUserData/dialog.json
 `--max-retries` 调整。
 
 默认最多同时发起 4 个 Judge 请求；可用 `--workers N`（或 `--concurrency N`）调整，
-例如 `--workers 8`。传入 `--workers 1` 时退回串行。即使并发完成顺序不同，最终
+例如 `--workers 8`。调度器只会保留最多 N 条执行中的请求：每完成或失败一条才启动下一条，
+不会一次把全部输入预先提交到线程池。传入 `--workers 1` 时退回串行。即使并发完成顺序不同，最终
 `dialogues` 和 `errors` 仍按原始输入顺序输出。
 
 运行时会在 stderr 显示每条对话的提交、完成或失败进度，例如：
 
 ```text
-[clarification-eval] 已提交 12/100 call_sno=103 已提交
+[clarification-eval] 已启动 12/100 call_sno=103 开始评估
 [clarification-eval] 已完成 12/100 (12.0%) call_sno=103 完成，澄清回答 1 次
 ```
 

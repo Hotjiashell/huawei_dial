@@ -16,7 +16,7 @@ No third-party Python package is required.
 from __future__ import annotations
 
 import argparse
-from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 import json
 import os
 import re
@@ -519,29 +519,47 @@ def evaluate_dialogues(
         # safe to share between workers. Result collection happens in the main
         # thread; this keeps callback calls and final output deterministic.
         futures: dict[Future[dict[str, Any]], tuple[int, Mapping[str, Any]]] = {}
-        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="llm-judge") as executor:
-            for record_index, record in enumerate(dialogues):
-                if progress_callback:
-                    progress_callback(record_index, total, "started", record)
-                future = executor.submit(evaluate_one_dialogue, record_index, record, judge)
-                futures[future] = (record_index, record)
+        next_record_index = 0
 
-            for future in as_completed(futures):
-                record_index, record = futures[future]
-                try:
-                    result = future.result()
-                    results_by_index[record_index] = result
-                    if progress_callback:
-                        progress_callback(record_index, total, "completed", result)
-                except Exception as exc:  # noqa: BLE001 - batch mode intentionally isolates records
-                    error = _error_record(record_index, record, exc)
-                    errors.append(error)
-                    if progress_callback:
-                        progress_callback(record_index, total, "failed", error)
-                    if not skip_errors:
-                        for pending in futures:
-                            pending.cancel()
-                        raise
+        def submit_next(executor: ThreadPoolExecutor) -> None:
+            """Submit one record only when a worker slot is available."""
+
+            nonlocal next_record_index
+            record_index = next_record_index
+            record = dialogues[record_index]
+            next_record_index += 1
+            if progress_callback:
+                progress_callback(record_index, total, "started", record)
+            future = executor.submit(evaluate_one_dialogue, record_index, record, judge)
+            futures[future] = (record_index, record)
+
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="llm-judge") as executor:
+            # Keep at most ``workers`` tasks in flight. Unlike submitting the
+            # whole input at once, this bounds queued work and makes progress
+            # output accurately reflect work that has actually been dispatched.
+            while next_record_index < total and len(futures) < workers:
+                submit_next(executor)
+
+            while futures:
+                done, _ = wait(futures, return_when=FIRST_COMPLETED)
+                for future in done:
+                    record_index, record = futures.pop(future)
+                    try:
+                        result = future.result()
+                        results_by_index[record_index] = result
+                        if progress_callback:
+                            progress_callback(record_index, total, "completed", result)
+                    except Exception as exc:  # noqa: BLE001 - batch mode intentionally isolates records
+                        error = _error_record(record_index, record, exc)
+                        errors.append(error)
+                        if progress_callback:
+                            progress_callback(record_index, total, "failed", error)
+                        if not skip_errors:
+                            for pending in futures:
+                                pending.cancel()
+                            raise
+                    if next_record_index < total:
+                        submit_next(executor)
 
     results = [results_by_index[index] for index in sorted(results_by_index)]
     errors.sort(key=lambda item: int(item["record_index"]))
@@ -589,7 +607,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return
             call_sno = item.get("call_sno", item.get("record_index", index))
             if status == "started":
-                detail = "已提交"
+                detail = "开始评估"
             elif status == "completed":
                 completed_count += 1
                 detail = f"完成，澄清回答 {len(item.get('clarification_pairs', []))} 次"
@@ -597,7 +615,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 completed_count += 1
                 detail = f"失败（{item.get('error_type', 'Error')}: {item.get('error', '')}）"
             if status == "started":
-                progress = f"已提交 {index + 1}/{total}"
+                progress = f"已启动 {index + 1}/{total}"
             else:
                 progress = f"已完成 {completed_count}/{total} ({completed_count / total:.1%})"
             print(f"[clarification-eval] {progress} call_sno={call_sno} {detail}", file=sys.stderr, flush=True)
