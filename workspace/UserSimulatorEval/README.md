@@ -42,6 +42,18 @@ python3 clarification_eval.py diveUserData/dialog.json
 回退到普通请求。网络失败或服务返回非 JSON 时会重试；可用 `--timeout` 和
 `--max-retries` 调整。
 
+运行时会在 stderr 显示每条对话的开始、完成或失败进度，例如：
+
+```text
+[clarification-eval] 12/100 (12.0%) call_sno=103 评估中
+[clarification-eval] 12/100 (12.0%) call_sno=103 完成，澄清回答 1 次
+```
+
+默认单条 Judge 请求、数据解析或 Judge 输出异常时，会记录该条错误并继续评估其他对话；
+最终 JSON 的 `errors` 保存 `record_index`、`call_sno`、异常类型和错误信息，
+`summary.error_count` 是失败条数。使用 `--fail-fast` 可改回首次失败即退出，使用
+`--no-progress` 可关闭进度输出。
+
 ## 输出
 
 输出是一个 JSON 对象，统计数字由脚本根据 Judge 返回的明细重新计算，而不是让模型直接生成：
@@ -50,6 +62,8 @@ python3 clarification_eval.py diveUserData/dialog.json
 {
   "summary": {
     "dialogue_count": 2,
+    "successful_dialogue_count": 2,
+    "error_count": 0,
     "dialogues_with_answered_clarification": 1,
     "answered_clarification_pair_count": 1,
     "clarification_question_count": 1,

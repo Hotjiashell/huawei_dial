@@ -23,7 +23,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 from urllib import error as urlerror
 from urllib import request as urlrequest
 
@@ -445,25 +445,64 @@ def aggregate_results(dialogue_results: Sequence[Mapping[str, Any]]) -> dict[str
     }
 
 
-def evaluate_dialogues(dialogues: Sequence[Mapping[str, Any]], judge: LLMJudge) -> dict[str, Any]:
+def evaluate_dialogues(
+    dialogues: Sequence[Mapping[str, Any]],
+    judge: LLMJudge,
+    *,
+    skip_errors: bool = True,
+    progress_callback: Callable[[int, int, str, Mapping[str, Any]], None] | None = None,
+) -> dict[str, Any]:
+    """Evaluate all dialogues.
+
+    ``skip_errors=True`` keeps a single failed LLM request from discarding the
+    whole batch. Failed records are retained in ``errors`` with their source
+    index/call number and an error message. ``progress_callback`` is called
+    with ``started``, ``completed`` or ``failed`` for each record and is kept
+    optional so this function remains quiet when used as a Python module.
+    """
+
     results: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+    total = len(dialogues)
     for record_index, record in enumerate(dialogues):
-        turns = parse_turns(record.get("chat_content", record.get("conversation", record.get("messages", ""))))
-        raw_judgement = judge.evaluate(turns) if turns else {"clarification_pairs": []}
-        normalized = normalize_judgement(raw_judgement, turns)
-        # The model returns answered pairs; question count is kept separately
-        # for the useful denominator in answer-rate analyses. It is inferred
-        # only from assistant turns that the judge identified as clarifications.
-        question_indices = {p["question_turn_index"] for p in normalized["clarification_pairs"]}
-        result = {
-            "record_index": record_index,
-            "call_sno": record.get("call_sno"),
-            "turns": [turn.as_dict() for turn in turns],
-            "clarification_question_count": len(question_indices),
-            **normalized,
-        }
-        results.append(result)
-    return {"summary": aggregate_results(results), "dialogues": results}
+        if progress_callback:
+            progress_callback(record_index, total, "started", record)
+        try:
+            turns = parse_turns(record.get("chat_content", record.get("conversation", record.get("messages", ""))))
+            raw_judgement = judge.evaluate(turns) if turns else {"clarification_pairs": []}
+            normalized = normalize_judgement(raw_judgement, turns)
+            # The model returns answered pairs; question count is kept separately
+            # for the useful denominator in answer-rate analyses. It is inferred
+            # only from assistant turns that the judge identified as clarifications.
+            question_indices = {p["question_turn_index"] for p in normalized["clarification_pairs"]}
+            result = {
+                "record_index": record_index,
+                "call_sno": record.get("call_sno"),
+                "turns": [turn.as_dict() for turn in turns],
+                "clarification_question_count": len(question_indices),
+                **normalized,
+            }
+            results.append(result)
+            if progress_callback:
+                progress_callback(record_index, total, "completed", result)
+        except Exception as exc:  # noqa: BLE001 - batch mode intentionally isolates records
+            error = {
+                "record_index": record_index,
+                "call_sno": record.get("call_sno"),
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+            }
+            errors.append(error)
+            if progress_callback:
+                progress_callback(record_index, total, "failed", error)
+            if not skip_errors:
+                raise
+    summary = aggregate_results(results)
+    summary["dialogue_count"] = total
+    summary["successful_dialogue_count"] = len(results)
+    summary["error_count"] = len(errors)
+    summary["evaluated_dialogue_count"] = total
+    return {"summary": summary, "dialogues": results, "errors": errors}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -475,6 +514,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output", help="Output JSON path; defaults to stdout")
     parser.add_argument("--timeout", type=float, default=60.0, help="HTTP timeout in seconds (default: 60)")
     parser.add_argument("--max-retries", type=int, default=2, help="Retries per request (default: 2)")
+    parser.add_argument("--fail-fast", action="store_true", help="Stop at the first failed dialogue instead of skipping it")
+    parser.add_argument("--no-progress", action="store_true", help="Disable per-dialogue progress output on stderr")
     return parser
 
 
@@ -488,7 +529,25 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         dialogues = load_dialogues(args.input)
         judge = LLMJudge(args.url, args.model_name, args.api_key, args.timeout, args.max_retries)
-        report = evaluate_dialogues(dialogues, judge)
+
+        def print_progress(index: int, total: int, status: str, item: Mapping[str, Any]) -> None:
+            if args.no_progress:
+                return
+            call_sno = item.get("call_sno", item.get("record_index", index))
+            if status == "started":
+                detail = "评估中"
+            elif status == "completed":
+                detail = f"完成，澄清回答 {len(item.get('clarification_pairs', []))} 次"
+            else:
+                detail = f"失败（{item.get('error_type', 'Error')}: {item.get('error', '')}）"
+            print(f"[clarification-eval] {index + 1}/{total} ({(index + 1) / total:.1%}) call_sno={call_sno} {detail}", file=sys.stderr, flush=True)
+
+        report = evaluate_dialogues(
+            dialogues,
+            judge,
+            skip_errors=not args.fail_fast,
+            progress_callback=print_progress,
+        )
     except (OSError, ValueError, RuntimeError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
