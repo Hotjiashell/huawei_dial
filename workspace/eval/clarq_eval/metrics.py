@@ -5,10 +5,10 @@ from collections import Counter
 from statistics import mean
 from typing import Any, Iterable
 
-from .clients import FAILED_DONE_TOKEN, JUDGE_FIELDS, SATISFIED_DONE_TOKEN
+from .clients import JUDGE_FIELDS
 
 
-SUCCESS_RECALL_K = 5
+SUCCESS_METHODS = {"ground_truth_top_k", "llm_judge", "no_final_results"}
 
 
 def _case_titles(cases: Iterable[dict[str, Any]]) -> list[str]:
@@ -39,6 +39,47 @@ def _target_title(result: dict[str, Any]) -> str:
             "legacy trajectories must be evaluated again"
         )
     return title
+
+
+def _success_judgment(result: dict[str, Any]) -> dict[str, Any]:
+    judgment = result.get("success_judgment")
+    if not isinstance(judgment, dict):
+        raise ValueError(
+            "Completed trajectories must contain a structured success_judgment; "
+            "legacy trajectories must be evaluated again"
+        )
+
+    success = judgment.get("success")
+    method = judgment.get("method")
+    top_k = judgment.get("top_k")
+    ground_truth_rank = judgment.get("ground_truth_rank")
+    if not isinstance(success, bool):
+        raise ValueError("success_judgment.success must be boolean")
+    if method not in SUCCESS_METHODS:
+        raise ValueError(f"Unknown success_judgment.method: {method!r}")
+    if isinstance(top_k, bool) or not isinstance(top_k, int) or top_k <= 0:
+        raise ValueError("success_judgment.top_k must be a positive integer")
+    if isinstance(ground_truth_rank, bool) or not isinstance(ground_truth_rank, int) or ground_truth_rank < 0:
+        raise ValueError("success_judgment.ground_truth_rank must be a non-negative integer")
+
+    judge = judgment.get("judge")
+    if method == "llm_judge":
+        if not isinstance(judge, dict):
+            raise ValueError("LLM success judgments must contain a judge result")
+        if set(judge) != {"can_answer", "reason"}:
+            raise ValueError("LLM success judge result must contain only can_answer and reason")
+        if not isinstance(judge.get("can_answer"), bool) or not isinstance(judge.get("reason"), str):
+            raise ValueError("LLM success judge result has invalid field types")
+        if success != judge["can_answer"]:
+            raise ValueError("success_judgment.success must match judge.can_answer")
+    elif judge is not None:
+        raise ValueError("Non-LLM success judgments must not contain a judge result")
+
+    if method == "ground_truth_top_k" and (not success or not 1 <= ground_truth_rank <= top_k):
+        raise ValueError("Ground-truth Top-K success judgment is inconsistent")
+    if method == "no_final_results" and (success or ground_truth_rank != 0):
+        raise ValueError("No-final-results success judgment is inconsistent")
+    return judgment
 
 
 def _ratio(numerator: int, denominator: int) -> float | None:
@@ -93,6 +134,7 @@ def _summarize_group(
     *,
     k_values: tuple[int, ...],
     max_turns: int,
+    configured_success_top_k: int | None,
 ) -> dict[str, Any]:
     completed = [result for result in results if not result.get("error")]
     failures = [result for result in results if result.get("error")]
@@ -127,25 +169,14 @@ def _summarize_group(
     any_search_recall = {
         str(k): _ratio(sum(1 <= rank <= k for rank in best_search_ranks), denominator) for k in k_values
     }
-    invalid_feedback = [
-        result.get("simulator_feedback")
-        for result in completed
-        if result.get("simulator_feedback") not in (SATISFIED_DONE_TOKEN, FAILED_DONE_TOKEN)
-    ]
-    if invalid_feedback:
-        raise ValueError(
-            "Completed trajectories must contain simulator_feedback equal to "
-            f"{SATISFIED_DONE_TOKEN!r} or {FAILED_DONE_TOKEN!r}; "
-            "legacy trajectories must be evaluated again"
-        )
-    satisfaction_successes = [
-        result["simulator_feedback"] == SATISFIED_DONE_TOKEN for result in completed
-    ]
-    top_five_hits = [1 <= rank <= SUCCESS_RECALL_K for rank in final_ranks]
-    success_flags = [
-        satisfied or top_five_hit
-        for satisfied, top_five_hit in zip(satisfaction_successes, top_five_hits)
-    ]
+    success_judgments = [_success_judgment(result) for result in completed]
+    judgment_top_ks = {judgment["top_k"] for judgment in success_judgments}
+    if len(judgment_top_ks) > 1:
+        raise ValueError("Completed trajectories use multiple Success Top-K values")
+    if configured_success_top_k is not None and judgment_top_ks and judgment_top_ks != {configured_success_top_k}:
+        raise ValueError("Stored success_judgment Top-K does not match the configured Success Top-K")
+    success_top_k = configured_success_top_k or next(iter(judgment_top_ks), 3)
+    success_flags = [judgment["success"] for judgment in success_judgments]
     final_successes = sum(success_flags)
 
     clarification_pairs: list[tuple[list[str], list[dict[str, Any]], str]] = []
@@ -230,17 +261,30 @@ def _summarize_group(
         },
         "result": {
             "success_definition": (
-                "training-aligned final case judgment equals <SATISFIED_DONE> or "
-                f"the ground-truth title is in the final top-{SUCCESS_RECALL_K}; "
+                f"ground-truth title is in the final top-{success_top_k}, or an independent "
+                "LLM Success Judge determines the final retrieved cases can answer the initial question; "
                 "Complete is not required"
             ),
             "success_rate": _ratio(final_successes, denominator),
-            "simulator_feedback_counts": {
-                SATISFIED_DONE_TOKEN: sum(satisfaction_successes),
-                FAILED_DONE_TOKEN: denominator - sum(satisfaction_successes),
+            "success_top_k": success_top_k,
+            "success_judgment_counts": {
+                "ground_truth_top_k_successes": sum(
+                    judgment["method"] == "ground_truth_top_k" for judgment in success_judgments
+                ),
+                "llm_judge_successes": sum(
+                    judgment["method"] == "llm_judge" and judgment["success"]
+                    for judgment in success_judgments
+                ),
+                "llm_judge_failures": sum(
+                    judgment["method"] == "llm_judge" and not judgment["success"]
+                    for judgment in success_judgments
+                ),
+                "no_final_results_failures": sum(
+                    judgment["method"] == "no_final_results" for judgment in success_judgments
+                ),
             },
-            "satisfaction_judge_call_rate": _ratio(
-                sum(bool(result.get("satisfaction_judge_called")) for result in completed),
+            "success_judge_call_rate": _ratio(
+                sum(judgment["method"] == "llm_judge" for judgment in success_judgments),
                 denominator,
             ),
             "final_recall_at_k": final_recall,
@@ -313,6 +357,7 @@ def summarize_results(
     *,
     k_values: tuple[int, ...] = (1, 3, 5),
     max_turns: int = 6,
+    success_top_k: int | None = None,
 ) -> dict[str, Any]:
     if not results:
         raise ValueError("No evaluation results to aggregate")
@@ -320,12 +365,15 @@ def summarize_results(
         raise ValueError("k_values must contain positive integers")
     if max_turns <= 0:
         raise ValueError("max_turns must be positive")
+    if success_top_k is not None and success_top_k <= 0:
+        raise ValueError("success_top_k must be positive")
 
     normalized_k = tuple(sorted(set(k_values)))
     overall = _summarize_group(
         results,
         k_values=normalized_k,
         max_turns=max_turns,
+        configured_success_top_k=success_top_k,
     )
     domains = sorted({str(result.get("domain") or "unknown") for result in results})
     per_domain = {
@@ -333,17 +381,17 @@ def summarize_results(
             [result for result in results if str(result.get("domain") or "unknown") == domain],
             k_values=normalized_k,
             max_turns=max_turns,
+            configured_success_top_k=success_top_k,
         )
         for domain in domains
     }
+    resolved_success_top_k = overall["result"]["success_top_k"]
     return {
-        "schema_version": "2.2",
+        "schema_version": "2.3",
         "metric_config": {
             "k_values": list(normalized_k),
             "max_turns": max_turns,
-            "success_token": SATISFIED_DONE_TOKEN,
-            "failure_token": FAILED_DONE_TOKEN,
-            "success_recall_k": SUCCESS_RECALL_K,
+            "success_top_k": resolved_success_top_k,
             "success_requires_complete": False,
             "infrastructure_failures_excluded_from_quality_denominators": True,
             "ground_truth_match_field": "title",

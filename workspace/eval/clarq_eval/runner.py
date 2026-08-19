@@ -6,10 +6,10 @@ import time
 from typing import Any, Protocol
 
 from .clients import (
-    FAILED_DONE_TOKEN,
     INVALID_CLARIFICATION_RESPONSE,
     UNKNOWN_CLARIFICATION_RESPONSE,
     OpenAIChatClient,
+    SuccessJudge,
     TrajectoryJudge,
     UserSimulator,
 )
@@ -123,6 +123,17 @@ def _normalized_question(question: str) -> str:
     return re.sub(r"\W+", "", question, flags=re.UNICODE).lower()
 
 
+def _ground_truth_rank(cases: list[dict[str, Any]], target_case_title: str) -> int:
+    return next(
+        (
+            rank
+            for rank, case in enumerate(cases, start=1)
+            if str(case.get("title") or "").strip() == target_case_title
+        ),
+        0,
+    )
+
+
 class EvaluationRunner:
     def __init__(
         self,
@@ -130,10 +141,12 @@ class EvaluationRunner:
         policy_client: OpenAIChatClient,
         user_simulator: UserSimulator,
         retriever: Retriever,
+        success_judge: SuccessJudge,
         judge: TrajectoryJudge | None = None,
         max_turns: int = 6,
         max_searches: int = 4,
         top_k: int = 5,
+        success_top_k: int = 3,
         case_content_chars: int = 1000,
         temperature: float = 0.0,
         max_tokens: int = 512,
@@ -141,15 +154,19 @@ class EvaluationRunner:
         enable_thinking: bool = False,
         system_prompt: str = SYSTEM_PROMPT,
     ):
-        if max_turns <= 0 or max_searches <= 0 or top_k <= 0:
-            raise ValueError("max_turns, max_searches, and top_k must be positive")
+        if max_turns <= 0 or max_searches <= 0 or top_k <= 0 or success_top_k <= 0:
+            raise ValueError("max_turns, max_searches, top_k, and success_top_k must be positive")
+        if success_top_k > top_k:
+            raise ValueError("success_top_k must not exceed top_k")
         self.policy_client = policy_client
         self.user_simulator = user_simulator
         self.retriever = retriever
+        self.success_judge = success_judge
         self.judge = judge
         self.max_turns = max_turns
         self.max_searches = max_searches
         self.top_k = top_k
+        self.success_top_k = success_top_k
         self.case_content_chars = case_content_chars
         self.temperature = temperature
         self.max_tokens = max_tokens
@@ -352,7 +369,7 @@ class EvaluationRunner:
             break
 
         result: dict[str, Any] = {
-            "schema_version": "2.2",
+            "schema_version": "2.3",
             "sample_id": sample.sample_id,
             "domain": sample.domain,
             "target_case_id": sample.target_case_id,
@@ -379,6 +396,7 @@ class EvaluationRunner:
                 "max_turns": self.max_turns,
                 "max_searches": self.max_searches,
                 "top_k": self.top_k,
+                "success_top_k": self.success_top_k,
                 "case_content_chars": self.case_content_chars,
                 "temperature": self.temperature,
                 "max_tokens": self.max_tokens,
@@ -387,12 +405,7 @@ class EvaluationRunner:
             },
             "error": None,
         }
-        if final_results:
-            result["simulator_feedback"] = self.user_simulator.judge_cases(sample, final_results)
-            result["satisfaction_judge_called"] = True
-        else:
-            result["simulator_feedback"] = FAILED_DONE_TOKEN
-            result["satisfaction_judge_called"] = False
+        result["success_judgment"] = self._judge_success(sample, final_results)
         result["elapsed_seconds"] = time.monotonic() - started_at
         if self.judge is not None:
             try:
@@ -405,3 +418,35 @@ class EvaluationRunner:
             result["judge"] = None
             result["judge_error"] = None
         return result
+
+    def _judge_success(
+        self,
+        sample: EvaluationSample,
+        final_results: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        ground_truth_rank = _ground_truth_rank(final_results, sample.target_case_title)
+        if 1 <= ground_truth_rank <= self.success_top_k:
+            return {
+                "success": True,
+                "method": "ground_truth_top_k",
+                "top_k": self.success_top_k,
+                "ground_truth_rank": ground_truth_rank,
+                "judge": None,
+            }
+        if not final_results:
+            return {
+                "success": False,
+                "method": "no_final_results",
+                "top_k": self.success_top_k,
+                "ground_truth_rank": 0,
+                "judge": None,
+            }
+
+        judgment = self.success_judge.judge(sample, final_results[: self.success_top_k])
+        return {
+            "success": judgment["can_answer"],
+            "method": "llm_judge",
+            "top_k": self.success_top_k,
+            "ground_truth_rank": ground_truth_rank,
+            "judge": judgment,
+        }

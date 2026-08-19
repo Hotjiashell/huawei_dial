@@ -4,12 +4,6 @@ import unittest
 
 import _bootstrap  # noqa: F401
 
-from clarq_eval.clients import (
-    FAILED_DONE_TOKEN,
-    INVALID_CLARIFICATION_RESPONSE,
-    SATISFIED_DONE_TOKEN,
-    UNKNOWN_CLARIFICATION_RESPONSE,
-)
 from clarq_eval.models import EvaluationSample
 from clarq_eval.runner import EvaluationRunner
 
@@ -61,21 +55,21 @@ class FakeRetriever:
 
 
 class FakeSimulator:
-    def __init__(
-        self,
-        responses: dict[str, str],
-        final_feedback: str = SATISFIED_DONE_TOKEN,
-    ):
+    def __init__(self, responses: dict[str, str]):
         self.responses = responses
-        self.final_feedback = final_feedback
-        self.judge_calls: list[list[dict]] = []
 
     def answer(self, sample: EvaluationSample, question: str) -> str:
         return self.responses[question]
 
-    def judge_cases(self, sample: EvaluationSample, cases: list[dict]) -> str:
-        self.judge_calls.append(cases)
-        return self.final_feedback
+
+class FakeSuccessJudge:
+    def __init__(self, can_answer: bool = False, reason: str = "No applicable case."):
+        self.judgment = {"can_answer": can_answer, "reason": reason}
+        self.calls: list[tuple[EvaluationSample, list[dict]]] = []
+
+    def judge(self, sample: EvaluationSample, cases: list[dict]) -> dict:
+        self.calls.append((sample, cases))
+        return dict(self.judgment)
 
 
 def case(case_id: str, title: str = "title") -> dict:
@@ -87,6 +81,7 @@ SAMPLE = EvaluationSample(
     domain="electronics",
     target_case_id="target",
     target_case_title="title",
+    target_case_content="canonical answer",
     initial_question="initial question",
     core_intent="intent",
     known_info=("Version 2", "Linux"),
@@ -94,7 +89,7 @@ SAMPLE = EvaluationSample(
 
 
 class EvaluationRunnerTests(unittest.TestCase):
-    def test_clarify_search_complete_and_pairing(self) -> None:
+    def test_clarify_search_complete_and_top_k_hit_skips_success_judge(self) -> None:
         policy = FakePolicy(
             [
                 tool_response("clarify_user", {"question": "Which version?"}),
@@ -108,11 +103,12 @@ class EvaluationRunnerTests(unittest.TestCase):
                 "initial question Version 2": [case("target"), case("other")],
             }
         )
-        simulator = FakeSimulator({"Which version?": "Version 2"})
+        success_judge = FakeSuccessJudge(can_answer=False)
         runner = EvaluationRunner(
             policy_client=policy,
-            user_simulator=simulator,
+            user_simulator=FakeSimulator({"Which version?": "Version 2"}),
             retriever=retriever,
+            success_judge=success_judge,
             max_turns=4,
         )
 
@@ -124,85 +120,88 @@ class EvaluationRunnerTests(unittest.TestCase):
         self.assertEqual(result["useful_clarification_count"], 1)
         self.assertEqual(result["search_count"], 1)
         self.assertEqual(result["final_results"][0]["case_id"], "target")
-        self.assertEqual(result["simulator_feedback"], SATISFIED_DONE_TOKEN)
-        self.assertTrue(result["satisfaction_judge_called"])
-        self.assertEqual(simulator.judge_calls[0][0]["case_id"], "target")
+        self.assertEqual(
+            result["success_judgment"],
+            {
+                "success": True,
+                "method": "ground_truth_top_k",
+                "top_k": 3,
+                "ground_truth_rank": 1,
+                "judge": None,
+            },
+        )
+        self.assertEqual(success_judge.calls, [])
         search_event = result["events"][1]
         self.assertEqual(search_event["clarifications_since_previous_search"], 1)
         self.assertEqual(search_event["pre_clarification_case_ids"], ["baseline-miss"])
-        self.assertEqual(search_event["pre_clarification_case_titles"], ["title"])
-        self.assertEqual(result["target_case_title"], "title")
         self.assertEqual(retriever.calls, [("initial question", 5), ("initial question Version 2", 5)])
 
-    def test_search_limit_reuses_latest_results_without_retrieval(self) -> None:
-        policy = FakePolicy(
-            [
-                tool_response("search_case", {"query": "query one"}),
-                tool_response("search_case", {"query": "query two"}, "call_2"),
-                complete_response(),
-            ]
-        )
-        retriever = FakeRetriever(
-            {
-                "initial question": [case("baseline")],
-                "query one": [case("target")],
-                "query two": [case("must-not-be-called")],
-            }
-        )
-        runner = EvaluationRunner(
-            policy_client=policy,
-            user_simulator=FakeSimulator({}),
-            retriever=retriever,
-            max_turns=3,
-            max_searches=1,
-        )
-
-        result = runner.run(SAMPLE)
-
-        self.assertEqual(result["search_count"], 1)
-        self.assertEqual(result["search_attempt_count"], 2)
-        self.assertTrue(result["events"][1]["search_limit_reached"])
-        self.assertFalse(result["events"][1]["search_executed"])
-        self.assertEqual(result["final_results"][0]["case_id"], "target")
-        self.assertEqual([query for query, _ in retriever.calls], ["initial question", "query one"])
-
-    def test_duplicate_unknown_and_invalid_clarifications(self) -> None:
-        questions = ["Which version?", "Which version?", "What color?", "Version and OS?"]
-        responses = [
-            tool_response("clarify_user", {"question": question}, f"call_{index}")
-            for index, question in enumerate(questions, start=1)
+    def test_gt_miss_calls_success_judge_with_only_configured_top_k(self) -> None:
+        retrieved = [
+            case("first", "First"),
+            case("second", "Second"),
+            case("third", "Third"),
+            case("fourth", "Fourth"),
         ]
-        responses.append(tool_response("search_case", {"query": "final query"}, "call_5"))
-        simulator = FakeSimulator(
-            {
-                "Which version?": "Version 2",
-                "What color?": UNKNOWN_CLARIFICATION_RESPONSE,
-                "Version and OS?": INVALID_CLARIFICATION_RESPONSE,
-            }
-        )
+        success_judge = FakeSuccessJudge(can_answer=True, reason="Third case gives the needed fix.")
         runner = EvaluationRunner(
-            policy_client=FakePolicy(responses),
-            user_simulator=simulator,
-            retriever=FakeRetriever(
-                {"initial question": [case("baseline")], "final query": [case("target")]}
-            ),
-            max_turns=5,
+            policy_client=FakePolicy([tool_response("search_case", {"query": "final"}), complete_response()]),
+            user_simulator=FakeSimulator({}),
+            retriever=FakeRetriever({"initial question": [case("baseline")], "final": retrieved}),
+            success_judge=success_judge,
+            top_k=4,
+            success_top_k=3,
+            max_turns=3,
         )
 
         result = runner.run(SAMPLE)
 
-        self.assertEqual(result["clarification_count"], 4)
-        self.assertEqual(result["useful_clarification_count"], 2)
-        self.assertEqual(result["unknown_clarification_count"], 1)
-        self.assertEqual(result["invalid_clarification_count"], 1)
-        self.assertEqual(result["duplicate_clarification_count"], 1)
-        self.assertEqual(result["stop_reason"], "max_turns")
-        self.assertEqual(result["search_count"], 0)
-        self.assertTrue(result["events"][-1]["tool_not_executed_due_to_turn_limit"])
-        self.assertEqual(result["simulator_feedback"], FAILED_DONE_TOKEN)
+        self.assertTrue(result["success_judgment"]["success"])
+        self.assertEqual(result["success_judgment"]["method"], "llm_judge")
+        self.assertEqual(result["success_judgment"]["ground_truth_rank"], 0)
+        self.assertEqual(result["success_judgment"]["judge"], success_judge.judgment)
+        self.assertEqual(len(success_judge.calls), 1)
+        judged_sample, judged_cases = success_judge.calls[0]
+        self.assertEqual(judged_sample.initial_question, "initial question")
+        self.assertEqual(judged_sample.target_case_title, "title")
+        self.assertEqual(judged_sample.target_case_content, "canonical answer")
+        self.assertEqual([item["case_id"] for item in judged_cases], ["first", "second", "third"])
 
-    def test_final_turn_tool_call_is_not_executed_and_previous_cases_are_judged(self) -> None:
-        simulator = FakeSimulator({}, final_feedback=SATISFIED_DONE_TOKEN)
+    def test_gt_miss_with_negative_success_judge_is_failure(self) -> None:
+        success_judge = FakeSuccessJudge(can_answer=False)
+        runner = EvaluationRunner(
+            policy_client=FakePolicy([tool_response("search_case", {"query": "final"}), complete_response()]),
+            user_simulator=FakeSimulator({}),
+            retriever=FakeRetriever({"initial question": [case("baseline")], "final": [case("other", "Other")]}),
+            success_judge=success_judge,
+            max_turns=3,
+        )
+
+        result = runner.run(SAMPLE)
+
+        self.assertFalse(result["success_judgment"]["success"])
+        self.assertEqual(result["success_judgment"]["method"], "llm_judge")
+        self.assertEqual(len(success_judge.calls), 1)
+
+    def test_no_agent_search_fails_without_success_judge_call(self) -> None:
+        success_judge = FakeSuccessJudge(can_answer=True)
+        runner = EvaluationRunner(
+            policy_client=FakePolicy([complete_response()]),
+            user_simulator=FakeSimulator({}),
+            retriever=FakeRetriever({"initial question": [case("target")]}),
+            success_judge=success_judge,
+            max_turns=2,
+        )
+
+        result = runner.run(SAMPLE)
+
+        self.assertEqual(result["stop_reason"], "complete")
+        self.assertEqual(result["success_judgment"]["method"], "no_final_results")
+        self.assertFalse(result["success_judgment"]["success"])
+        self.assertEqual(success_judge.calls, [])
+
+    def test_final_turn_tool_call_uses_previous_retrieval_for_success(self) -> None:
+        success_judge = FakeSuccessJudge(can_answer=False)
         retriever = FakeRetriever(
             {
                 "initial question": [case("baseline")],
@@ -217,8 +216,9 @@ class EvaluationRunnerTests(unittest.TestCase):
                     tool_response("search_case", {"query": "query two"}, "call_2"),
                 ]
             ),
-            user_simulator=simulator,
+            user_simulator=FakeSimulator({}),
             retriever=retriever,
+            success_judge=success_judge,
             max_turns=2,
         )
 
@@ -226,68 +226,20 @@ class EvaluationRunnerTests(unittest.TestCase):
 
         self.assertEqual(result["stop_reason"], "max_turns")
         self.assertEqual(result["search_count"], 1)
-        self.assertEqual(result["search_attempt_count"], 1)
-        self.assertEqual(result["final_results"][0]["case_id"], "target")
-        self.assertEqual(result["simulator_feedback"], SATISFIED_DONE_TOKEN)
+        self.assertEqual(result["success_judgment"]["method"], "ground_truth_top_k")
         self.assertEqual([query for query, _ in retriever.calls], ["initial question", "query one"])
+        self.assertEqual(success_judge.calls, [])
 
-    def test_training_aligned_success_does_not_require_complete(self) -> None:
-        policy = FakePolicy(
-            [
-                tool_response("search_case", {"query": "final query"}),
-                {"choices": [{"finish_reason": "stop", "message": {"content": "Done"}}]},
-            ]
-        )
-        simulator = FakeSimulator({}, final_feedback=SATISFIED_DONE_TOKEN)
-        runner = EvaluationRunner(
-            policy_client=policy,
-            user_simulator=simulator,
-            retriever=FakeRetriever(
-                {"initial question": [case("baseline")], "final query": [case("other")]}
-            ),
-            max_turns=3,
-        )
-
-        result = runner.run(SAMPLE)
-
-        self.assertEqual(result["stop_reason"], "unexpected_text")
-        self.assertEqual(result["turn_count"], 2)
-        self.assertEqual(result["simulator_feedback"], SATISFIED_DONE_TOKEN)
-
-    def test_no_agent_search_is_failed_without_final_judge_call(self) -> None:
-        simulator = FakeSimulator({}, final_feedback=SATISFIED_DONE_TOKEN)
-        runner = EvaluationRunner(
-            policy_client=FakePolicy([complete_response()]),
-            user_simulator=simulator,
-            retriever=FakeRetriever({"initial question": [case("target")]}),
-            max_turns=2,
-        )
-
-        result = runner.run(SAMPLE)
-
-        self.assertEqual(result["stop_reason"], "complete")
-        self.assertEqual(result["simulator_feedback"], FAILED_DONE_TOKEN)
-        self.assertFalse(result["satisfaction_judge_called"])
-        self.assertEqual(simulator.judge_calls, [])
-
-    def test_empty_final_search_is_failed_without_final_judge_call(self) -> None:
-        simulator = FakeSimulator({}, final_feedback=SATISFIED_DONE_TOKEN)
-        runner = EvaluationRunner(
-            policy_client=FakePolicy(
-                [tool_response("search_case", {"query": "empty query"}), complete_response()]
-            ),
-            user_simulator=simulator,
-            retriever=FakeRetriever({"initial question": [case("target")], "empty query": []}),
-            max_turns=3,
-        )
-
-        result = runner.run(SAMPLE)
-
-        self.assertEqual(result["search_count"], 1)
-        self.assertEqual(result["final_results"], [])
-        self.assertEqual(result["simulator_feedback"], FAILED_DONE_TOKEN)
-        self.assertFalse(result["satisfaction_judge_called"])
-        self.assertEqual(simulator.judge_calls, [])
+    def test_runner_validates_success_top_k(self) -> None:
+        with self.assertRaisesRegex(ValueError, "success_top_k"):
+            EvaluationRunner(
+                policy_client=FakePolicy([]),
+                user_simulator=FakeSimulator({}),
+                retriever=FakeRetriever({}),
+                success_judge=FakeSuccessJudge(),
+                top_k=2,
+                success_top_k=3,
+            )
 
 
 if __name__ == "__main__":

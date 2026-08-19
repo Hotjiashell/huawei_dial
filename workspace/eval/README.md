@@ -9,15 +9,16 @@
 `clarify_user`、`search_case` 和 `Complete` 之间决策。追问由训练时同款 Qwen3-32B
 模拟用户回答，搜索直接复用
 `workspace/verl_dial-main-h800/examples/clarq_grpo/retriever.py` 的 `CaseRetriever`。
-轨迹结束后使用训练时完全相同的 case-judge 提示词，只对最后一次 Agent 检索调用一次
-模拟器并取得 `<SATISFIED_DONE>/<FAILED_DONE>`。Success 满足以下任一条件即可：终局结果为
-`<SATISFIED_DONE>`，或最终检索的 Top-5 命中标准案例 title；没有得到非空的 Agent 检索结果
-则直接失败。之后还可选调用独立的轨迹质量 Judge，最后生成总体及分领域指标。
+轨迹结束后，先检查最后一次 Agent 检索的可配置 Top-K 是否命中标准案例 title（默认 Top-3）。
+命中则直接成功；未命中时，独立 Success Judge 会比较原始问题、标准案例的 title/content 和
+最终 Top-K 案例的 title/content，判断这些召回案例能否回答原始问题。没有得到非空的 Agent
+检索结果则直接失败，不调用 Success Judge。之后还可选调用独立的轨迹质量 Judge，最后生成
+总体及分领域指标。
 
 测试数据默认为 `workspace/ClarQ/profile_split/test`，共 800 条，覆盖 `electronics`、
 `money`、`superuser` 和 `travel` 四个领域。测试样本中的 `case_id` 会在评估启动时从
-`workspace/ClarQ/case_answers_with_title.json` 解析为标准 `title`；Recall/MRR 只比较
-title，不直接比较 case_id。正式指标定义见 [metric.md](metric.md)。
+`workspace/ClarQ/case_answers_with_title.json` 解析为标准 `title` 和 `answer`；Recall/MRR
+只比较 title，不直接比较 case_id。正式指标定义见 [metric.md](metric.md)。
 
 ## 环境准备
 
@@ -33,17 +34,20 @@ cp workspace/eval/config.example.env workspace/eval/.env
 运行产物的 `run_config.json` 也不会保存 API Key、Elasticsearch 密码或 URL 查询参数。
 
 案例标题文档可以通过 `CASE_DOCUMENT_PATH` 或命令行 `--case-document` 指定。文档可以是
-`[{"case_id": "case0001", "title": "..."}, ...]` 数组，也可以是
-`{"case0001": "..."}` 映射对象；每个测试样本的 case_id 必须能解析到非空 title。这个
-文档是 GT 标题映射，不是 Elasticsearch index，也不替代 `--elasticsearch-index`。
+`[{"case_id": "case0001", "title": "...", "answer": "..."}, ...]` 数组，也可以将
+`answer` 写为 `content` 或 `text`。每个测试样本的 case_id 必须能解析到非空 title 和内容，
+因为未命中时 Success Judge 会使用标准案例内容作为参考。这个文档不是 Elasticsearch index，
+也不替代 `--elasticsearch-index`。
 
 必须可访问以下组件：
 
 - 训练后策略模型服务；
-- Qwen3-32B 用户模拟器服务，用于回答追问和必需的终局满意度判定；
+- Qwen3-32B 用户模拟器服务，用于回答追问；
+- 必需的 Success Judge 服务。可通过 `SUCCESS_JUDGE_*` 单独配置；未配置时依次复用
+  `JUDGE_*`、用户模拟器服务；
 - Elasticsearch 与 embedding 服务；
 - 可选的独立轨迹质量 Judge。未配置时默认复用用户模拟器，使用 `--skip-judge` 可关闭；
-  该参数不会关闭正式 Success 所需的终局满意度判定。
+  该参数不会关闭正式 Success Judge。
 
 ## 运行
 
@@ -60,6 +64,7 @@ workspace/eval/run_evaluation.sh --check-only
 workspace/eval/run_evaluation.sh \
   --limit 20 \
   --workers 4 \
+  --success-top-k 3 \
   --output-dir workspace/eval/outputs/smoke
 ```
 
@@ -108,17 +113,17 @@ python3 workspace/eval/evaluate.py \
   --k-values 1,3,5
 ```
 
-程序会从原运行配置校验已保存的 `top_k`，拒绝计算超出轨迹保留深度的 K；
+程序会从原运行配置校验已保存的 `top_k` 和 `success_top_k`，拒绝计算超出轨迹保留深度的 K；
 `--max-turns` 未指定时也会沿用原运行配置。正常在线运行出现基础设施失败时退出码为 2，质量指标会
 排除这些样本；临时实验可用 `--allow-infrastructure-failures` 允许零退出码，但正式报告应先
-恢复失败样本。旧版轨迹没有保存 `simulator_feedback` 或 `target_case_title`，无法离线
-推导当前口径的 Success/Recall，聚合时会明确报错，需要重新执行评估。更换标题文档后
+恢复失败样本。旧版轨迹没有保存 `success_judgment` 或 `target_case_title`，无法离线
+推导当前口径的 Success/Recall，聚合时会明确报错，需要重新执行评估。更换案例文档后
 也必须使用新的输出目录，或重新完整评估。
 
 ## 产物
 
 - `trajectories.jsonl`：完整对话、工具调用、检索列表、停止原因、
-  标准 `target_case_title`、`<SATISFIED_DONE>/<FAILED_DONE>`、耗时和可选 Judge 结果；
+  标准 `target_case_title`、结构化 `success_judgment`、耗时和可选轨迹 Judge 结果；
 - `errors.jsonl`：有基础设施失败时生成的错误历史；
 - `metrics.json`：机器可读总体、分领域指标及 Wilson 95% 置信区间；
 - `report.md`：中文汇总报告；

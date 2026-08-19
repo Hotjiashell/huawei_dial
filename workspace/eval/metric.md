@@ -5,9 +5,10 @@
 
 ## 1. 符号与样本范围
 
-- 测试样本 $i$ 的标准案例标题为 $g_i$。测试数据仍提供 `case_id`，评估启动时从可配置的
-  案例文档（默认 `workspace/ClarQ/case_answers_with_title.json`）解析出对应 `title`；
-  `case_id` 只用于这一步映射和轨迹审计。
+- 测试样本 $i$ 的标准案例为 $G_i=(g_i,a_i)$，其中 $g_i$ 是 title，$a_i$ 是案例内容。
+  测试数据仍提供 `case_id`，评估启动时从可配置的案例文档（默认
+  `workspace/ClarQ/case_answers_with_title.json`）解析出对应 title 和 answer；`case_id`
+  只用于这一步映射和轨迹审计。
 - 检索结果中的案例仍保留服务返回的 `case_id`，但所有召回、MRR 和追问增益的命中判断
   都使用 `title` 的精确匹配（区分大小写，去除首尾空白）。
 - title 不要求全局唯一；如果案例文档中多个案例具有完全相同的 title，检索到其中任意一个
@@ -17,10 +18,11 @@
 - `first`、`final` 分别是 Agent 第一次、最后一次真实执行的检索。
 - `any` 表示 Agent 任意一次真实检索中的最佳目标排名。
 - 一轮（turn）定义为一次策略模型决策，包括追问、检索、`Complete` 或异常文本。
-- 默认最多 6 轮、4 次真实检索，每次保留 Top 5。
+- 默认最多 6 轮、4 次真实检索，每次保留 Top 5；Success 使用的最终 Top-K 独立配置，
+  默认是 3，且不得大于每次保留的检索结果数量。
 - 与训练状态机一致，到达最后一个允许的策略轮次时先终止；该轮若生成工具调用，记录该
   决策但不执行工具，终局判定使用此前最后一次真实检索结果。
-- 服务、网络、Elasticsearch、embedding 或终局满意度模拟器故障属于基础设施失败，
+- 服务、网络、Elasticsearch、embedding 或 Success Judge 故障属于基础设施失败，
   不进入质量指标分母；失败数量和错误明细单独报告。可选轨迹质量 Judge 失败不影响
   Success、Recall 等指标。
 
@@ -39,29 +41,32 @@ Recall_s@K = \frac{1}{N}\sum_{i=1}^{N}\mathbb{1}[rank_s(g_i)\le K]
 
 ### Success Rate
 
-Success 结合训练同款的终局满意度判定与最终检索的 Top-5 召回。Agent 轨迹结束后：
+Success 先检查最终检索的可配置 Top-$K_s$（默认 $K_s=3$），再在未命中时由独立的 LLM
+Success Judge 做可答性判断。Agent 轨迹结束后：
 
-- 如果 Agent 没有执行过 `search_case`，或者最后一次真实检索结果为空，直接记为
-  `<FAILED_DONE>`，不调用模型；
-- 否则把 `core_intent`、原始问题和最后一次真实检索结果交给训练同款 case judge；
-- case judge 仅在至少一个最终案例真正解决核心意图时返回 `<SATISFIED_DONE>`，否则返回
-  `<FAILED_DONE>`；
-- 每条轨迹只进行这一次终局判定，不在每轮或每次检索后调用；
+- 如果标准案例 title 位于最终检索前 $K_s$，直接成功，不调用 Success Judge；
+- 如果没有 Agent 检索，或者最后一次真实检索结果为空，直接失败，不调用 Success Judge；
+- 其他情况把原始问题、标准案例的 title/content，以及最终 Top-$K_s$ 案例的 title/content
+  传给独立 Success Judge；
+- Success Judge 仅判断这些案例是否能回答原始问题，并以标准案例作为预期答案范围的参考；
+  不要求案例 title、ID 或关键词完全一致；
+- Success Judge 返回 `can_answer=true` 则成功，否则失败；每条轨迹最多调用一次该 Judge，
+  不在每轮或每次检索后调用；
 - 不要求策略以严格文本 `Complete` 结束。`Complete` 率作为独立的协议/效率指标报告。
 
-令终局反馈为 $f_i$，$r_i$ 为标准案例 title 在最终检索结果中的排名（未命中时为 0）：
+令 $r_i$ 为标准案例 title 在最终检索结果中的排名（未命中时为 0），令 $j_i$ 为未命中时
+Success Judge 的 `can_answer` 结果。定义：
 
 \[
 SuccessRate = \frac{1}{N}\sum_{i=1}^{N}
-\mathbb{1}[f_i=\texttt{<SATISFIED\_DONE>} \lor 1\le r_i\le5]
+\mathbb{1}[1\le r_i\le K_s \lor (r_i=0\ \text{or}\ r_i>K_s)\land j_i]
 \]
 
-模拟器返回空字符串、非法选项或 HTTP 400 时，与训练一致回退为 `<FAILED_DONE>`；其他服务
-错误按基础设施失败处理。最终 Top-5 的标准 title 命中会使样本成功，即使 judge 返回
-`<FAILED_DONE>`；相反，judge 返回 `<SATISFIED_DONE>` 时，即使 GT title 未命中也成功。
-Recall@K、MRR 和追问增益仍单独报告。测试数据中的 `case_id` 只用于解析标准 title 和轨迹审计。
-标准 title 解析失败时样本不能进入在线评估；缺少
-`target_case_title` 的旧轨迹不能按新口径离线聚合。
+Success Judge 输出不是合法 JSON、字段类型不符合约束或服务请求失败时，样本按基础设施失败
+处理，而不是静默记为失败。每条完成轨迹保存结构化 `success_judgment`，离线聚合只读取该结论，
+不会再次调用模型。Recall@K、MRR 和追问增益仍单独报告。测试数据中的 `case_id` 只用于解析
+标准案例和轨迹审计。标准案例 title 或内容解析失败时样本不能进入在线评估；缺少
+`success_judgment` 的旧轨迹不能按新口径离线聚合。
 
 ### MRR
 
@@ -119,15 +124,15 @@ Recall@K。连续追问只产生一个区间，避免把同一次检索收益重
 
 令 $t_i$ 为一条成功轨迹结束时的策略轮数。这里的“结束”采用训练状态机口径：模型输出
 任意不包含工具调用的文本（包括 `Complete`），或达到配置的最大策略轮数，都会结束；
-最终仍只调用一次 case judge。失败轨迹的 $t_i$ 不定义。
+最终最多调用一次 Success Judge。失败轨迹的 $t_i$ 不定义。
 
 \[
 Success@Turn(N) = \frac{1}{N_{samples}}\sum_i
-\mathbb{1}[(f_i=\texttt{<SATISFIED\_DONE>} \lor 1\le r_i\le5) \land t_i\le N]
+\mathbb{1}[Success_i \land t_i\le N]
 \]
 
 这是累计指标：在第 $N$ 轮内结束且满足 Success 条件的样本，会计入第 $N$ 轮及其后的所有轮次。
-它不会为了计算不同的 $N$ 重复调用 case judge。默认报告第 1 到第 6 轮；最后一轮的
+它不会为了计算不同的 $N$ 重复调用 Success Judge。默认报告第 1 到第 6 轮；最后一轮的
 `Success@Turn` 应等于总体 Success Rate。
 
 ## 5. 可选轨迹质量 Judge
@@ -141,4 +146,4 @@ Success@Turn(N) = \frac{1}{N_{samples}}\sum_i
 
 报告 Judge 覆盖率、平均分和各问题发生率。所有比率只以成功获得 Judge
 结果的样本为分母，必须连同覆盖率一起解读。使用 `--skip-judge` 只关闭这个可选诊断，
-不会关闭生成 `<SATISFIED_DONE>/<FAILED_DONE>` 的训练同款终局判定。
+不会关闭正式 Success Judge。

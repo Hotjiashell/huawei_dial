@@ -5,15 +5,14 @@ import io
 import tempfile
 import unittest
 from argparse import Namespace
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from copy import deepcopy
 from pathlib import Path
 
 import _bootstrap  # noqa: F401
 
-from clarq_eval.clients import SATISFIED_DONE_TOKEN
 from clarq_eval.metrics import summarize_results
-from clarq_eval.models import EvaluationSample, load_case_titles, load_samples
+from clarq_eval.models import EvaluationSample, load_case_documents, load_case_titles, load_samples
 from clarq_eval.reporting import append_jsonl, read_jsonl, render_markdown, write_json, write_report
 from evaluate import (
     _prepare_output,
@@ -52,8 +51,13 @@ def successful_result(sample: EvaluationSample) -> dict:
         "elapsed_seconds": 0.01,
         "judge": None,
         "judge_error": None,
-        "simulator_feedback": SATISFIED_DONE_TOKEN,
-        "satisfaction_judge_called": True,
+        "success_judgment": {
+            "success": True,
+            "method": "ground_truth_top_k",
+            "top_k": 3,
+            "ground_truth_rank": 1,
+            "judge": None,
+        },
         "error": None,
     }
 
@@ -117,10 +121,16 @@ class ModelAndReportingTests(unittest.TestCase):
             data_root.mkdir()
             document = root / "cases.json"
             document.write_text(
-                json.dumps([{"case_id": "case-1", "title": "Canonical title"}]),
+                json.dumps(
+                    [{"case_id": "case-1", "title": "Canonical title", "answer": "Canonical content"}]
+                ),
                 encoding="utf-8",
             )
             self.assertEqual(load_case_titles(document), {"case-1": "Canonical title"})
+            self.assertEqual(
+                load_case_documents(document),
+                {"case-1": {"title": "Canonical title", "content": "Canonical content"}},
+            )
             mapping = root / "mapping.json"
             mapping.write_text(json.dumps({"case-1": "Mapped title"}), encoding="utf-8")
             self.assertEqual(load_case_titles(mapping), {"case-1": "Mapped title"})
@@ -138,8 +148,12 @@ class ModelAndReportingTests(unittest.TestCase):
                 + "\n",
                 encoding="utf-8",
             )
-            samples = load_samples(data_root, case_titles={"case-1": "Canonical title"})
+            samples = load_samples(
+                data_root,
+                case_documents={"case-1": {"title": "Canonical title", "content": "Canonical content"}},
+            )
             self.assertEqual(samples[0].target_case_title, "Canonical title")
+            self.assertEqual(samples[0].target_case_content, "Canonical content")
             with self.assertRaisesRegex(ValueError, "missing from the case title document"):
                 load_samples(data_root, case_titles={"other": "Other title"})
 
@@ -207,8 +221,13 @@ class ModelAndReportingTests(unittest.TestCase):
             "elapsed_seconds": 0.5,
             "judge": None,
             "judge_error": None,
-            "simulator_feedback": SATISFIED_DONE_TOKEN,
-            "satisfaction_judge_called": True,
+            "success_judgment": {
+                "success": True,
+                "method": "ground_truth_top_k",
+                "top_k": 3,
+                "ground_truth_rank": 1,
+                "judge": None,
+            },
             "error": None,
         }
         metrics = summarize_results([result], k_values=(1, 3), max_turns=2)
@@ -233,6 +252,7 @@ class ModelAndReportingTests(unittest.TestCase):
         self.assertIsNone(args.policy_base_url)
         self.assertIsNone(args.max_turns)
         self.assertIsNone(args.top_k)
+        self.assertEqual(args.success_top_k, 3)
 
     def test_offline_aggregate_rejects_k_beyond_stored_depth(self) -> None:
         sample = EvaluationSample("one", "money", "target", "question", "intent", (), "Target title")
@@ -242,7 +262,7 @@ class ModelAndReportingTests(unittest.TestCase):
             append_jsonl(output_dir / "trajectories.jsonl", result)
             write_json(
                 output_dir / "run_config.json",
-                {"trajectory": {"top_k": 1, "max_turns": 2}},
+                {"trajectory": {"top_k": 1, "max_turns": 2}, "metrics": {"success_top_k": 3}},
             )
             with self.assertRaisesRegex(ValueError, "only retain Top 1"):
                 aggregate(output_dir, (1, 3), None)
@@ -263,6 +283,8 @@ class ModelAndReportingTests(unittest.TestCase):
                     "simulator",
                     "--simulator-api-key",
                     "simulator-secret",
+                    "--success-judge-api-key",
+                    "success-judge-secret",
                     "--elasticsearch-password",
                     "elastic-secret",
                     "--embedding-api-key",
@@ -277,6 +299,7 @@ class ModelAndReportingTests(unittest.TestCase):
                 "url-secret",
                 "policy-secret",
                 "simulator-secret",
+                "success-judge-secret",
                 "elastic-secret",
                 "embedding-secret",
             ):
@@ -293,6 +316,25 @@ class ModelAndReportingTests(unittest.TestCase):
             legacy["schema_version"] = "1.0"
             with self.assertRaises(ValueError):
                 _prepare_output(args, legacy)
+
+    def test_online_success_top_k_must_fit_retrieval_depth(self) -> None:
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            parse_args(
+                [
+                    "--policy-base-url",
+                    "http://policy/v1",
+                    "--policy-model",
+                    "policy",
+                    "--simulator-model",
+                    "simulator",
+                    "--top-k",
+                    "2",
+                    "--k-values",
+                    "1",
+                    "--success-top-k",
+                    "3",
+                ]
+            )
 
     def test_execution_resume_retries_only_latest_failure(self) -> None:
         samples = [
@@ -313,6 +355,7 @@ class ModelAndReportingTests(unittest.TestCase):
                 workers=2,
                 k_values=(1, 3, 5),
                 max_turns=2,
+                success_top_k=3,
             )
             first_runner = FakeEvaluationRunner(failures={"sample-1"})
             with redirect_stdout(io.StringIO()):

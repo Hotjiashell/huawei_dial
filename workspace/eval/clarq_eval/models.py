@@ -14,37 +14,59 @@ def load_case_titles(path: Path) -> dict[str, str]:
     datasets, which makes the evaluation input easy to generate without
     duplicating the full case answers.
     """
+    return {case_id: record["title"] for case_id, record in load_case_documents(path).items()}
+
+
+def load_case_documents(path: Path) -> dict[str, dict[str, str]]:
+    """Load canonical case title and answer content keyed by case ID."""
     if not path.is_file():
-        raise FileNotFoundError(f"Case title document does not exist: {path}")
+        raise FileNotFoundError(f"Case document does not exist: {path}")
     try:
         with path.open(encoding="utf-8") as file:
             payload = json.load(file)
     except json.JSONDecodeError as error:
-        raise ValueError(f"Invalid JSON in case title document {path}: {error}") from error
+        raise ValueError(f"Invalid JSON in case document {path}: {error}") from error
 
     if isinstance(payload, dict):
-        records: list[tuple[Any, Any]] = list(payload.items())
+        records: list[tuple[Any, Any, Any]] = []
+        for case_id, value in payload.items():
+            if isinstance(value, dict):
+                records.append(
+                    (
+                        case_id,
+                        value.get("title"),
+                        value.get("content", value.get("answer", value.get("text", ""))),
+                    )
+                )
+            else:
+                records.append((case_id, value, ""))
     elif isinstance(payload, list):
         records = []
         for index, record in enumerate(payload, start=1):
             if not isinstance(record, dict):
                 raise ValueError(f"Case document item {index} must be a JSON object")
-            records.append((record.get("case_id"), record.get("title")))
+            records.append(
+                (
+                    record.get("case_id"),
+                    record.get("title"),
+                    record.get("content", record.get("answer", record.get("text", ""))),
+                )
+            )
     else:
-        raise ValueError("Case title document must be a JSON array or object mapping case IDs to titles")
+        raise ValueError("Case document must be a JSON array or object mapping case IDs to cases")
 
-    titles: dict[str, str] = {}
-    for index, (raw_case_id, raw_title) in enumerate(records, start=1):
+    documents: dict[str, dict[str, str]] = {}
+    for index, (raw_case_id, raw_title, raw_content) in enumerate(records, start=1):
         case_id = str(raw_case_id or "").strip()
         title = str(raw_title or "").strip()
         if not case_id or not title:
             raise ValueError(f"Case document item {index} must contain non-empty case_id and title")
-        if case_id in titles:
+        if case_id in documents:
             raise ValueError(f"Duplicate case_id in case title document: {case_id}")
-        titles[case_id] = title
-    if not titles:
-        raise ValueError(f"Case title document contains no cases: {path}")
-    return titles
+        documents[case_id] = {"title": title, "content": str(raw_content or "").strip()}
+    if not documents:
+        raise ValueError(f"Case document contains no cases: {path}")
+    return documents
 
 
 @dataclass(frozen=True)
@@ -56,6 +78,7 @@ class EvaluationSample:
     core_intent: str
     known_info: tuple[str, ...]
     target_case_title: str = ""
+    target_case_content: str = ""
 
     @property
     def profile(self) -> dict[str, Any]:
@@ -72,6 +95,7 @@ class EvaluationSample:
         domain: str,
         line_number: int,
         case_titles: Mapping[str, str] | None = None,
+        case_documents: Mapping[str, Mapping[str, str]] | None = None,
     ) -> "EvaluationSample":
         required = ("case_id", "context", "core_intent", "known_info")
         missing = [key for key in required if key not in record]
@@ -85,9 +109,20 @@ class EvaluationSample:
 
         target_case_id = str(record["case_id"]).strip()
         target_case_title = ""
+        target_case_content = ""
+        if case_documents is not None:
+            try:
+                target_case_title = str(case_documents[target_case_id]["title"]).strip()
+                target_case_content = str(case_documents[target_case_id].get("content", ""))
+            except KeyError as error:
+                raise ValueError(
+                    f"case_id {target_case_id!r} from {domain}.json line {line_number} "
+                    "is missing from the case document"
+                ) from error
         if case_titles is not None:
             try:
-                target_case_title = str(case_titles[target_case_id]).strip()
+                if not target_case_title:
+                    target_case_title = str(case_titles[target_case_id]).strip()
             except KeyError as error:
                 raise ValueError(
                     f"case_id {target_case_id!r} from {domain}.json line {line_number} "
@@ -101,6 +136,7 @@ class EvaluationSample:
             core_intent=str(record["core_intent"]).strip(),
             known_info=tuple(str(item).strip() for item in known_info if str(item).strip()),
             target_case_title=target_case_title,
+            target_case_content=target_case_content,
         )
 
 
@@ -110,6 +146,7 @@ def load_samples(
     offset: int = 0,
     limit: int | None = None,
     case_titles: Mapping[str, str] | None = None,
+    case_documents: Mapping[str, Mapping[str, str]] | None = None,
 ) -> list[EvaluationSample]:
     if not test_root.is_dir():
         raise FileNotFoundError(f"Test data directory does not exist: {test_root}")
@@ -139,7 +176,13 @@ def load_samples(
                     record = json.loads(line)
                 except json.JSONDecodeError as error:
                     raise ValueError(f"Invalid JSON in {path}:{line_number}: {error}") from error
-                sample = EvaluationSample.from_record(record, path.stem, line_number, case_titles)
+                sample = EvaluationSample.from_record(
+                    record,
+                    path.stem,
+                    line_number,
+                    case_titles,
+                    case_documents,
+                )
                 if sample.sample_id in seen_ids:
                     raise ValueError(f"Duplicate sample id: {sample.sample_id}")
                 seen_ids.add(sample.sample_id)

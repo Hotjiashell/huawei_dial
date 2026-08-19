@@ -12,9 +12,9 @@ from pathlib import Path
 from typing import Any, Sequence
 from urllib.parse import urlsplit, urlunsplit
 
-from clarq_eval.clients import OpenAIChatClient, TrajectoryJudge, UserSimulator
+from clarq_eval.clients import OpenAIChatClient, SuccessJudge, TrajectoryJudge, UserSimulator
 from clarq_eval.metrics import summarize_results
-from clarq_eval.models import EvaluationSample, load_case_titles, load_samples
+from clarq_eval.models import EvaluationSample, load_case_documents, load_samples
 from clarq_eval.reporting import append_jsonl, read_jsonl, write_json, write_report
 from clarq_eval.runner import EvaluationRunner
 
@@ -82,7 +82,7 @@ def build_parser() -> argparse.ArgumentParser:
             "CASE_DOCUMENT_PATH",
             _env("CASE_ANSWERS_PATH", str(DEFAULT_CASE_DOCUMENT)),
         ),
-        help="JSON document used to resolve each test sample case_id to its canonical title.",
+        help="JSON document used to resolve each test sample case_id to its canonical title and content.",
     )
     parser.add_argument("--verl-root", type=Path, default=DEFAULT_VERL_ROOT)
     parser.add_argument("--output-dir", type=Path)
@@ -96,6 +96,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-turns", type=int, default=int(max_turns_env) if max_turns_env else None)
     parser.add_argument("--max-searches", type=int, default=int(_env("EVAL_MAX_SEARCHES", "4")))
     parser.add_argument("--top-k", type=int, default=int(top_k_env) if top_k_env else None)
+    parser.add_argument(
+        "--success-top-k",
+        type=int,
+        default=int(_env("EVAL_SUCCESS_TOP_K", "3")),
+        help="Final retrieval depth used for the Success title-hit check and Success Judge input.",
+    )
     parser.add_argument("--k-values", type=_csv_ints, default=_csv_ints(_env("EVAL_K_VALUES", "1,3,5")))
     parser.add_argument("--case-content-chars", type=int, default=int(_env("EVAL_CASE_CONTENT_CHARS", "1000")))
     parser.add_argument("--policy-temperature", type=float, default=float(_env("POLICY_TEMPERATURE", "0")))
@@ -135,10 +141,25 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--judge-api-key", default=_env("JUDGE_API_KEY"))
     parser.add_argument("--judge-timeout", type=float, default=float(_env("JUDGE_TIMEOUT", "120")))
     parser.add_argument("--judge-max-retries", type=int, default=int(_env("JUDGE_MAX_RETRIES", "3")))
+    success_judge_timeout = _env("SUCCESS_JUDGE_TIMEOUT")
+    success_judge_max_retries = _env("SUCCESS_JUDGE_MAX_RETRIES")
+    parser.add_argument("--success-judge-base-url", default=_env("SUCCESS_JUDGE_BASE_URL"))
+    parser.add_argument("--success-judge-model", default=_env("SUCCESS_JUDGE_MODEL"))
+    parser.add_argument("--success-judge-api-key", default=_env("SUCCESS_JUDGE_API_KEY"))
+    parser.add_argument(
+        "--success-judge-timeout",
+        type=float,
+        default=float(success_judge_timeout) if success_judge_timeout else None,
+    )
+    parser.add_argument(
+        "--success-judge-max-retries",
+        type=int,
+        default=int(success_judge_max_retries) if success_judge_max_retries else None,
+    )
     parser.add_argument(
         "--skip-judge",
         action="store_true",
-        help="Skip the optional trajectory-quality Judge; final satisfaction judgment remains enabled.",
+        help="Skip the optional trajectory-quality Judge; the independent Success Judge remains enabled.",
     )
 
     parser.add_argument(
@@ -210,11 +231,13 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "max_turns",
         "max_searches",
         "top_k",
+        "success_top_k",
         "case_content_chars",
         "policy_max_tokens",
         "policy_max_retries",
         "simulator_max_retries",
         "judge_max_retries",
+        "success_judge_max_retries",
         "rank_window",
         "vector_num_candidates",
         "rrf_rank_constant",
@@ -230,6 +253,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     required_depth = max(args.k_values)
     if not args.aggregate_only and args.top_k < required_depth:
         parser.error(f"--top-k must be at least {required_depth} for the configured metrics")
+    if not args.aggregate_only and args.success_top_k > args.top_k:
+        parser.error("--success-top-k must not exceed --top-k")
     if args.aggregate_only and args.check_only:
         parser.error("--aggregate-only and --check-only cannot be combined")
     if not args.aggregate_only:
@@ -241,10 +266,16 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         ):
             if not value:
                 parser.error(f"{option} is required (or set the corresponding environment variable)")
-        if not args.skip_judge:
-            args.judge_base_url = args.judge_base_url or args.simulator_base_url
-            args.judge_model = args.judge_model or args.simulator_model
-            args.judge_api_key = args.judge_api_key or args.simulator_api_key
+        args.judge_base_url = args.judge_base_url or args.simulator_base_url
+        args.judge_model = args.judge_model or args.simulator_model
+        args.judge_api_key = args.judge_api_key or args.simulator_api_key
+        args.success_judge_base_url = args.success_judge_base_url or args.judge_base_url
+        args.success_judge_model = args.success_judge_model or args.judge_model
+        args.success_judge_api_key = args.success_judge_api_key or args.judge_api_key
+        args.success_judge_timeout = args.success_judge_timeout or args.judge_timeout
+        args.success_judge_max_retries = (
+            args.success_judge_max_retries or args.judge_max_retries
+        )
     args.domains = _csv_strings(args.domains)
     args.test_root = args.test_root.resolve()
     args.case_document = args.case_document.resolve()
@@ -324,6 +355,14 @@ def build_components(args: argparse.Namespace) -> tuple[EvaluationRunner, list[t
         args.simulator_max_retries,
     )
     health_clients = [("policy", policy_client), ("user simulator", simulator_client)]
+    success_judge_client = _client(
+        args.success_judge_base_url,
+        args.success_judge_model,
+        args.success_judge_api_key,
+        args.success_judge_timeout,
+        args.success_judge_max_retries,
+    )
+    health_clients.append(("success judge", success_judge_client))
     judge = None
     if not args.skip_judge:
         judge_client = _client(
@@ -341,10 +380,12 @@ def build_components(args: argparse.Namespace) -> tuple[EvaluationRunner, list[t
         policy_client=policy_client,
         user_simulator=UserSimulator(simulator_client),
         retriever=retriever,
+        success_judge=SuccessJudge(success_judge_client),
         judge=judge,
         max_turns=args.max_turns,
         max_searches=args.max_searches,
         top_k=args.top_k,
+        success_top_k=args.success_top_k,
         case_content_chars=args.case_content_chars,
         temperature=args.policy_temperature,
         max_tokens=args.policy_max_tokens,
@@ -356,7 +397,7 @@ def build_components(args: argparse.Namespace) -> tuple[EvaluationRunner, list[t
 
 def _run_config(args: argparse.Namespace) -> dict[str, Any]:
     return {
-        "schema_version": "2.2",
+        "schema_version": "2.3",
         "created_at": datetime.now(timezone.utc).isoformat(),
         "data": {
             "test_root": str(args.test_root),
@@ -378,13 +419,14 @@ def _run_config(args: argparse.Namespace) -> dict[str, Any]:
         "metrics": {
             "k_values": list(args.k_values),
             "success_definition": (
-                "simulator_feedback == <SATISFIED_DONE> or "
-                "ground-truth title is in final top-5"
+                f"ground-truth title is in final top-{args.success_top_k}, or an "
+                "independent Success Judge determines the final retrieved cases can answer "
+                "the initial question"
             ),
-            "success_recall_k": 5,
+            "success_top_k": args.success_top_k,
             "success_requires_complete": False,
             "ground_truth_match_field": "title",
-            "ground_truth_title_source": "case_id resolved from data.case_document",
+            "ground_truth_case_source": "case_id resolved from data.case_document",
         },
         "services": {
             "policy": {"base_url": _redact_url(args.policy_base_url), "model": args.policy_model},
@@ -395,6 +437,10 @@ def _run_config(args: argparse.Namespace) -> dict[str, Any]:
             "judge": None
             if args.skip_judge
             else {"base_url": _redact_url(args.judge_base_url), "model": args.judge_model},
+            "success_judge": {
+                "base_url": _redact_url(args.success_judge_base_url),
+                "model": args.success_judge_model,
+            },
         },
         "retrieval": {
             "search_server_host": _redact_url(args.search_server_host),
@@ -412,7 +458,7 @@ def _run_config(args: argparse.Namespace) -> dict[str, Any]:
         },
         "execution": {
             "workers": args.workers,
-            "final_satisfaction_judge_enabled": True,
+            "success_judge_enabled": True,
             "trajectory_judge_enabled": not args.skip_judge,
         },
     }
@@ -425,6 +471,10 @@ def _resume_signature(config: dict[str, Any]) -> dict[str, Any]:
         "trajectory": config.get("trajectory"),
         "services": config.get("services"),
         "retrieval": config.get("retrieval"),
+        "success_metric": {
+            "success_top_k": config.get("metrics", {}).get("success_top_k"),
+            "success_definition": config.get("metrics", {}).get("success_definition"),
+        },
     }
 
 
@@ -465,7 +515,7 @@ def latest_records(records: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
 
 def _error_record(sample: EvaluationSample, error: Exception, elapsed_seconds: float) -> dict[str, Any]:
     return {
-        "schema_version": "2.2",
+        "schema_version": "2.3",
         "sample_id": sample.sample_id,
         "domain": sample.domain,
         "target_case_id": sample.target_case_id,
@@ -481,8 +531,7 @@ def _error_record(sample: EvaluationSample, error: Exception, elapsed_seconds: f
         "clarification_count": 0,
         "search_count": 0,
         "elapsed_seconds": elapsed_seconds,
-        "simulator_feedback": None,
-        "satisfaction_judge_called": False,
+        "success_judgment": None,
         "judge": None,
         "judge_error": None,
         "error": {"type": type(error).__name__, "message": str(error)},
@@ -548,6 +597,20 @@ def aggregate(
             f"Cannot compute K={required_depth}: stored trajectories only retain Top {stored_top_k}"
         )
 
+    stored_success_top_k = run_config.get("metrics", {}).get("success_top_k")
+    if stored_success_top_k is None:
+        stored_success_depths = [
+            record.get("runner_config", {}).get("success_top_k")
+            for record in records
+            if not record.get("error")
+        ]
+        stored_success_depths = [int(depth) for depth in stored_success_depths if depth is not None]
+        stored_success_top_k = min(stored_success_depths) if stored_success_depths else None
+    if stored_success_top_k is not None and stored_top_k is not None and int(stored_success_top_k) > int(stored_top_k):
+        raise ValueError(
+            f"Stored Success Top-K {stored_success_top_k} exceeds retained retrieval Top-K {stored_top_k}"
+        )
+
     if max_turns is None:
         max_turns = run_config.get("trajectory", {}).get("max_turns")
     if max_turns is None:
@@ -562,6 +625,7 @@ def aggregate(
         records,
         k_values=k_values,
         max_turns=int(max_turns),
+        success_top_k=int(stored_success_top_k) if stored_success_top_k is not None else None,
     )
     write_json(output_dir / "metrics.json", metrics)
     write_report(output_dir / "report.md", metrics)
@@ -615,6 +679,7 @@ def run_evaluation(
         selected_records,
         k_values=args.k_values,
         max_turns=args.max_turns,
+        success_top_k=args.success_top_k,
     )
     write_json(args.output_dir / "metrics.json", metrics)
     write_report(args.output_dir / "report.md", metrics)
@@ -634,14 +699,21 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 2
         return 0
 
-    case_titles = load_case_titles(args.case_document)
+    case_documents = load_case_documents(args.case_document)
     samples = load_samples(
         args.test_root,
         domains=args.domains,
         offset=args.offset,
         limit=args.limit,
-        case_titles=case_titles,
+        case_documents=case_documents,
     )
+    missing_target_content = [sample.sample_id for sample in samples if not sample.target_case_content.strip()]
+    if missing_target_content:
+        raise ValueError(
+            "The case document must provide non-empty content for every target case required by "
+            f"the Success Judge; missing content for {len(missing_target_content)} sample(s), "
+            f"starting with {missing_target_content[0]!r}"
+        )
     print(f"Loaded {len(samples)} samples from {args.test_root}")
     runner, health_clients, retriever = build_components(args)
     if not args.skip_preflight:

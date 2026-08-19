@@ -69,10 +69,10 @@ def render_markdown(metrics: dict[str, Any]) -> str:
         "",
         "## 评估口径",
         "",
-        "- Success Rate：终局 case judge 返回 `<SATISFIED_DONE>`，或标准案例 title 位于最终检索 Top-5；不要求输出 `Complete`。",
+        f"- Success Rate：标准案例 title 位于最终检索 Top-{config['success_top_k']}，或独立 Success Judge 判定最终案例可回答原始问题；不要求输出 `Complete`。",
         "- Recall@K：标准案例的 title 位于对应检索结果前 K 名；标准 title 由测试样本的 case_id 从案例文档解析得到。",
         "- Success@Turn N：最终判定成功，且训练状态机在第 N 次策略决策内结束。",
-        "- 没有非空的 Agent 检索结果时直接返回 `<FAILED_DONE>`，不调用终局 case judge。",
+        "- 最终检索为空时直接记为 Success 失败，不调用 Success Judge。",
         "- 追问增益：追问前最近检索（没有则为原始问题 baseline）与追问后首次检索的 Recall@K 差值。",
         "- 基础设施失败不进入质量指标分母，单独报告失败数量。",
         "",
@@ -84,11 +84,15 @@ def render_markdown(metrics: dict[str, Any]) -> str:
         f"- 可选轨迹 Judge 失败：{overall['sample_counts']['judge_failures']}",
         f"- Success Rate：{_fmt(overall['result']['success_rate'], percent=True)}"
         f"（Wilson 95% CI {_fmt_ci(overall['confidence_intervals']['success_rate'])}）",
-        f"- `<SATISFIED_DONE>` / `<FAILED_DONE>`："
-        f"{overall['result']['simulator_feedback_counts']['<SATISFIED_DONE>']} / "
-        f"{overall['result']['simulator_feedback_counts']['<FAILED_DONE>']}",
-        f"- 终局 case judge 调用率："
-        f"{_fmt(overall['result']['satisfaction_judge_call_rate'], percent=True)}",
+        f"- 标准案例 Top-{overall['result']['success_top_k']} 直接成功："
+        f"{overall['result']['success_judgment_counts']['ground_truth_top_k_successes']}",
+        f"- Success Judge 成功 / 失败："
+        f"{overall['result']['success_judgment_counts']['llm_judge_successes']} / "
+        f"{overall['result']['success_judgment_counts']['llm_judge_failures']}",
+        f"- 最终检索为空的失败："
+        f"{overall['result']['success_judgment_counts']['no_final_results_failures']}",
+        f"- Success Judge 调用率："
+        f"{_fmt(overall['result']['success_judge_call_rate'], percent=True)}",
         f"- 未执行 Agent 检索率：{_fmt(overall['result']['no_agent_search_rate'], percent=True)}",
         f"- 最终检索空结果率：{_fmt(overall['result']['empty_final_search_rate'], percent=True)}",
         "",

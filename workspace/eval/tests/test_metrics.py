@@ -1,9 +1,31 @@
+from __future__ import annotations
+
 import unittest
 
 import _bootstrap  # noqa: F401
 
-from clarq_eval.clients import FAILED_DONE_TOKEN, JUDGE_FIELDS, SATISFIED_DONE_TOKEN
+from clarq_eval.clients import JUDGE_FIELDS
 from clarq_eval.metrics import summarize_results
+
+
+def success_judgment(
+    *,
+    success: bool,
+    method: str,
+    top_k: int = 3,
+    ground_truth_rank: int = 0,
+    reason: str = "Not applicable.",
+) -> dict:
+    judge = None
+    if method == "llm_judge":
+        judge = {"can_answer": success, "reason": reason}
+    return {
+        "success": success,
+        "method": method,
+        "top_k": top_k,
+        "ground_truth_rank": ground_truth_rank,
+        "judge": judge,
+    }
 
 
 def result_template(sample_id: str, target: str) -> dict:
@@ -28,14 +50,13 @@ def result_template(sample_id: str, target: str) -> dict:
         "elapsed_seconds": 1.0,
         "judge": None,
         "judge_error": None,
-        "simulator_feedback": FAILED_DONE_TOKEN,
-        "satisfaction_judge_called": True,
+        "success_judgment": success_judgment(success=False, method="llm_judge"),
         "error": None,
     }
 
 
 class MetricTests(unittest.TestCase):
-    def test_recall_gain_success_turn_and_top_five_fallback(self) -> None:
+    def test_recall_success_turn_and_judgment_breakdown(self) -> None:
         first = result_template("first", "target-a")
         first["baseline_results"] = [{"case_id": "miss"}]
         first["final_results"] = [
@@ -58,7 +79,11 @@ class MetricTests(unittest.TestCase):
         first["useful_clarification_count"] = 1
         first["judge"] = {field: False for field in JUDGE_FIELDS}
         first["judge"].update({"score": 4, "reason": "good"})
-        first["simulator_feedback"] = SATISFIED_DONE_TOKEN
+        first["success_judgment"] = success_judgment(
+            success=True,
+            method="ground_truth_top_k",
+            ground_truth_rank=1,
+        )
 
         second = result_template("second", "target-b")
         second["baseline_results"] = [{"case_id": "target-b", "title": "title-target-b"}]
@@ -77,14 +102,21 @@ class MetricTests(unittest.TestCase):
         ]
         second["turn_count"] = 1
         second["judge_error"] = "judge unavailable"
+        second["success_judgment"] = success_judgment(
+            success=True,
+            method="llm_judge",
+            reason="The first retrieved case answers the question equivalently.",
+        )
 
         failure = result_template("failed", "target-c")
         failure["error"] = {"type": "Timeout", "message": "service unavailable"}
+        failure["success_judgment"] = None
 
         metrics = summarize_results(
             [first, second, failure],
             k_values=(1, 3, 5),
             max_turns=3,
+            success_top_k=3,
         )
         overall = metrics["overall"]
 
@@ -93,9 +125,15 @@ class MetricTests(unittest.TestCase):
         self.assertEqual(overall["sample_counts"]["infrastructure_failures"], 1)
         self.assertEqual(overall["result"]["success_rate"], 1.0)
         self.assertEqual(
-            overall["result"]["simulator_feedback_counts"],
-            {SATISFIED_DONE_TOKEN: 1, FAILED_DONE_TOKEN: 1},
+            overall["result"]["success_judgment_counts"],
+            {
+                "ground_truth_top_k_successes": 1,
+                "llm_judge_successes": 1,
+                "llm_judge_failures": 0,
+                "no_final_results_failures": 0,
+            },
         )
+        self.assertEqual(overall["result"]["success_judge_call_rate"], 0.5)
         self.assertEqual(overall["result"]["final_recall_at_k"], {"1": 0.5, "3": 1.0, "5": 1.0})
         self.assertEqual(overall["result"]["baseline_recall_at_k"]["1"], 0.5)
         self.assertEqual(overall["process"]["clarification_gain_at_k"]["1"], 1)
@@ -106,66 +144,80 @@ class MetricTests(unittest.TestCase):
         self.assertEqual(overall["efficiency"]["success_at_turn"], {"1": 0.5, "2": 1.0, "3": 1.0})
         self.assertEqual(overall["trajectory_judge"]["coverage"], 0.5)
         self.assertEqual(overall["trajectory_judge"]["mean_score"], 4)
-        self.assertNotIn("premature_completion_rate", overall["trajectory_judge"])
-        self.assertNotIn("final_cases_satisfy_intent_rate", overall["trajectory_judge"])
-        self.assertNotIn("overall_satisfied_rate", overall["trajectory_judge"])
         self.assertEqual(overall["sample_counts"]["judge_failures"], 1)
 
-    def test_success_accepts_satisfaction_or_final_top_five_hit(self) -> None:
-        satisfied_gt_miss = result_template("satisfied", "target")
-        satisfied_gt_miss["final_results"] = [{"case_id": "other", "title": "other-title"}]
-        satisfied_gt_miss["simulator_feedback"] = SATISFIED_DONE_TOKEN
-        satisfied_gt_miss["stop_reason"] = "unexpected_text"
-        satisfied_gt_miss["turn_count"] = 2
+    def test_success_uses_stored_llm_decision_not_final_title_rank(self) -> None:
+        llm_success = result_template("llm-success", "target")
+        llm_success["final_results"] = [{"case_id": "other", "title": "Other title"}]
+        llm_success["success_judgment"] = success_judgment(
+            success=True,
+            method="llm_judge",
+            reason="Equivalent answer.",
+        )
+        llm_success["stop_reason"] = "unexpected_text"
+        llm_success["turn_count"] = 2
 
-        failed_gt_hit = result_template("failed", "target")
-        failed_gt_hit["final_results"] = [{"case_id": "target", "title": "title-target"}]
-        failed_gt_hit["simulator_feedback"] = FAILED_DONE_TOKEN
-        failed_gt_hit["turn_count"] = 1
+        top_k_success = result_template("title-hit", "target")
+        top_k_success["final_results"] = [{"case_id": "target", "title": "title-target"}]
+        top_k_success["success_judgment"] = success_judgment(
+            success=True,
+            method="ground_truth_top_k",
+            ground_truth_rank=1,
+        )
+        top_k_success["turn_count"] = 1
+
+        llm_failure = result_template("llm-failure", "target")
+        llm_failure["final_results"] = [{"case_id": "different", "title": "Different title"}]
+        llm_failure["success_judgment"] = success_judgment(success=False, method="llm_judge")
 
         overall = summarize_results(
-            [satisfied_gt_miss, failed_gt_hit],
+            [llm_success, top_k_success, llm_failure],
             k_values=(1,),
             max_turns=3,
+            success_top_k=3,
         )["overall"]
 
-        self.assertEqual(overall["result"]["success_rate"], 1.0)
-        self.assertEqual(overall["result"]["final_recall_at_k"]["1"], 0.5)
-        self.assertEqual(overall["efficiency"]["success_at_turn"], {"1": 0.5, "2": 1.0, "3": 1.0})
+        self.assertEqual(overall["result"]["success_rate"], 2 / 3)
+        self.assertEqual(overall["result"]["final_recall_at_k"]["1"], 1 / 3)
+        self.assertEqual(overall["efficiency"]["success_at_turn"], {"1": 1 / 3, "2": 2 / 3, "3": 2 / 3})
 
-    def test_final_rank_five_succeeds_but_rank_six_does_not(self) -> None:
-        rank_five = result_template("rank-five", "target-five")
-        rank_five["final_results"] = [
-            *[{"case_id": f"miss-{index}", "title": f"miss-{index}"} for index in range(1, 5)],
-            {"case_id": "target-five", "title": "title-target-five"},
-        ]
+    def test_no_final_results_is_a_stored_failure(self) -> None:
+        result = result_template("empty", "target")
+        result["search_count"] = 0
+        result["success_judgment"] = success_judgment(success=False, method="no_final_results")
 
-        rank_six = result_template("rank-six", "target-six")
-        rank_six["final_results"] = [
-            *[{"case_id": f"miss-{index}", "title": f"miss-{index}"} for index in range(1, 6)],
-            {"case_id": "target-six", "title": "title-target-six"},
-        ]
+        overall = summarize_results([result], k_values=(1,), max_turns=2, success_top_k=3)["overall"]
 
-        overall = summarize_results([rank_five, rank_six], k_values=(1,), max_turns=2)["overall"]
+        self.assertEqual(overall["result"]["success_rate"], 0.0)
+        self.assertEqual(overall["result"]["success_judge_call_rate"], 0.0)
+        self.assertEqual(overall["result"]["success_judgment_counts"]["no_final_results_failures"], 1)
 
-        self.assertEqual(overall["result"]["final_recall_at_k"]["1"], 0.0)
-        self.assertEqual(overall["result"]["success_rate"], 0.5)
-
-    def test_missing_training_feedback_is_rejected(self) -> None:
+    def test_missing_success_judgment_is_rejected(self) -> None:
         result = result_template("legacy", "target")
-        result.pop("simulator_feedback")
+        result.pop("success_judgment")
         with self.assertRaisesRegex(ValueError, "legacy trajectories"):
             summarize_results([result])
+
+    def test_mismatched_success_top_k_is_rejected(self) -> None:
+        result = result_template("one", "target")
+        with self.assertRaisesRegex(ValueError, "does not match"):
+            summarize_results([result], success_top_k=5)
 
     def test_recall_matches_title_instead_of_case_id(self) -> None:
         result = result_template("title-match", "target-id")
         result["target_case_title"] = "Canonical title"
         result["final_results"] = [{"case_id": "different-id", "title": "Canonical title"}]
-        metrics = summarize_results([result], k_values=(1,), max_turns=2)
+        result["success_judgment"] = success_judgment(
+            success=True,
+            method="ground_truth_top_k",
+            ground_truth_rank=1,
+        )
+        metrics = summarize_results([result], k_values=(1,), max_turns=2, success_top_k=3)
         self.assertEqual(metrics["overall"]["result"]["final_recall_at_k"]["1"], 1.0)
 
         result["final_results"] = [{"case_id": "target-id", "title": "Different title"}]
-        metrics = summarize_results([result], k_values=(1,), max_turns=2)
+        result["success_judgment"] = success_judgment(success=False, method="llm_judge")
+        metrics = summarize_results([result], k_values=(1,), max_turns=2, success_top_k=3)
         self.assertEqual(metrics["overall"]["result"]["final_recall_at_k"]["1"], 0.0)
 
     def test_missing_target_title_is_rejected(self) -> None:
