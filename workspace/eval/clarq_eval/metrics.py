@@ -66,12 +66,23 @@ def _success_judgment(result: dict[str, Any]) -> dict[str, Any]:
     if method == "llm_judge":
         if not isinstance(judge, dict):
             raise ValueError("LLM success judgments must contain a judge result")
-        if set(judge) != {"can_answer", "reason"}:
-            raise ValueError("LLM success judge result must contain only can_answer and reason")
-        if not isinstance(judge.get("can_answer"), bool) or not isinstance(judge.get("reason"), str):
+        if set(judge) != {"can_answer", "answer_case_title", "reason"}:
+            raise ValueError(
+                "LLM success judge result must contain only can_answer, answer_case_title, and reason"
+            )
+        answer_case_title = judge.get("answer_case_title")
+        if (
+            not isinstance(judge.get("can_answer"), bool)
+            or not isinstance(judge.get("reason"), str)
+            or (answer_case_title is not None and not isinstance(answer_case_title, str))
+        ):
             raise ValueError("LLM success judge result has invalid field types")
         if success != judge["can_answer"]:
             raise ValueError("success_judgment.success must match judge.can_answer")
+        if success and not answer_case_title:
+            raise ValueError("Successful LLM success judgments must contain answer_case_title")
+        if not success and answer_case_title is not None:
+            raise ValueError("Failed LLM success judgments must set answer_case_title to null")
     elif judge is not None:
         raise ValueError("Non-LLM success judgments must not contain a judge result")
 
@@ -387,7 +398,7 @@ def summarize_results(
     }
     resolved_success_top_k = overall["result"]["success_top_k"]
     return {
-        "schema_version": "2.3",
+        "schema_version": "2.4",
         "metric_config": {
             "k_values": list(normalized_k),
             "max_turns": max_turns,

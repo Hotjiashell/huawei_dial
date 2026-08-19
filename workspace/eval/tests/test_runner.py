@@ -63,8 +63,17 @@ class FakeSimulator:
 
 
 class FakeSuccessJudge:
-    def __init__(self, can_answer: bool = False, reason: str = "No applicable case."):
-        self.judgment = {"can_answer": can_answer, "reason": reason}
+    def __init__(
+        self,
+        can_answer: bool = False,
+        answer_case_title: str | None = None,
+        reason: str = "No applicable case.",
+    ):
+        self.judgment = {
+            "can_answer": can_answer,
+            "answer_case_title": answer_case_title,
+            "reason": reason,
+        }
         self.calls: list[tuple[EvaluationSample, list[dict]]] = []
 
     def judge(self, sample: EvaluationSample, cases: list[dict]) -> dict:
@@ -143,7 +152,11 @@ class EvaluationRunnerTests(unittest.TestCase):
             case("third", "Third"),
             case("fourth", "Fourth"),
         ]
-        success_judge = FakeSuccessJudge(can_answer=True, reason="Third case gives the needed fix.")
+        success_judge = FakeSuccessJudge(
+            can_answer=True,
+            answer_case_title="Third",
+            reason="Third case gives the needed fix.",
+        )
         runner = EvaluationRunner(
             policy_client=FakePolicy([tool_response("search_case", {"query": "final"}), complete_response()]),
             user_simulator=FakeSimulator({}),

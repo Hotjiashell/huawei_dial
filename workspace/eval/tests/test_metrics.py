@@ -14,11 +14,16 @@ def success_judgment(
     method: str,
     top_k: int = 3,
     ground_truth_rank: int = 0,
+    answer_case_title: str | None = None,
     reason: str = "Not applicable.",
 ) -> dict:
     judge = None
     if method == "llm_judge":
-        judge = {"can_answer": success, "reason": reason}
+        judge = {
+            "can_answer": success,
+            "answer_case_title": answer_case_title if success else None,
+            "reason": reason,
+        }
     return {
         "success": success,
         "method": method,
@@ -105,6 +110,7 @@ class MetricTests(unittest.TestCase):
         second["success_judgment"] = success_judgment(
             success=True,
             method="llm_judge",
+            answer_case_title="x-title",
             reason="The first retrieved case answers the question equivalently.",
         )
 
@@ -152,6 +158,7 @@ class MetricTests(unittest.TestCase):
         llm_success["success_judgment"] = success_judgment(
             success=True,
             method="llm_judge",
+            answer_case_title="Other title",
             reason="Equivalent answer.",
         )
         llm_success["stop_reason"] = "unexpected_text"
@@ -196,6 +203,17 @@ class MetricTests(unittest.TestCase):
         result = result_template("legacy", "target")
         result.pop("success_judgment")
         with self.assertRaisesRegex(ValueError, "legacy trajectories"):
+            summarize_results([result])
+
+    def test_successful_llm_judgment_without_selected_title_is_rejected(self) -> None:
+        result = result_template("legacy-llm", "target")
+        result["success_judgment"] = success_judgment(
+            success=True,
+            method="llm_judge",
+            answer_case_title="Equivalent title",
+        )
+        result["success_judgment"]["judge"].pop("answer_case_title")
+        with self.assertRaisesRegex(ValueError, "answer_case_title"):
             summarize_results([result])
 
     def test_mismatched_success_top_k_is_rejected(self) -> None:

@@ -185,9 +185,10 @@ class SuccessJudge:
         "type": "object",
         "properties": {
             "can_answer": {"type": "boolean"},
+            "answer_case_title": {"type": ["string", "null"]},
             "reason": {"type": "string"},
         },
-        "required": ["can_answer", "reason"],
+        "required": ["can_answer", "answer_case_title", "reason"],
         "additionalProperties": False,
     }
 
@@ -203,7 +204,7 @@ answer and scope:
 Final retrieved cases:
 {retrieved_cases}
 
-Decide whether one or more of the final retrieved cases can genuinely answer the
+Decide whether one of the final retrieved cases can genuinely answer the
 initial user question to the scope established by the canonical ground-truth
 case. Consider both titles and contents. Do not require an exact title, ID, or
 keyword match. A retrieved case must provide a materially applicable answer;
@@ -216,13 +217,19 @@ Return exactly one valid JSON object, with no Markdown code fence or additional
 text, in this exact shape:
 {{
   "can_answer": true,
+  "answer_case_title": "Exact title copied from one final retrieved case",
   "reason": "Brief evidence-based explanation."
 }}
 
 Output rules:
 - can_answer must be a JSON boolean, never a string.
+- If can_answer is true, answer_case_title must exactly copy the title of one
+  supplied final retrieved case. It identifies the single case that can answer
+  the question. If the same title appears more than once, select the earliest
+  rank with that title.
+- If can_answer is false, answer_case_title must be null.
 - reason must be a concise string grounded in the supplied cases.
-- Do not add fields other than can_answer and reason.
+- Do not add fields other than can_answer, answer_case_title, and reason.
 """
 
     def __init__(self, client: OpenAIChatClient):
@@ -274,17 +281,36 @@ Output rules:
             )
 
         judgment = parse_json_object(response_content(response))
-        self._validate(judgment)
+        self._validate(judgment, retrieved_cases)
         return judgment
 
     @classmethod
-    def _validate(cls, judgment: dict[str, Any]) -> None:
-        if set(judgment) != {"can_answer", "reason"}:
-            raise PolicyProtocolError("Success Judge must return only can_answer and reason")
+    def _validate(cls, judgment: dict[str, Any], retrieved_cases: list[dict[str, Any]]) -> None:
+        if set(judgment) != {"can_answer", "answer_case_title", "reason"}:
+            raise PolicyProtocolError(
+                "Success Judge must return only can_answer, answer_case_title, and reason"
+            )
         if not isinstance(judgment.get("can_answer"), bool):
             raise PolicyProtocolError("Success Judge field can_answer must be boolean")
+        answer_case_title = judgment.get("answer_case_title")
+        if answer_case_title is not None and not isinstance(answer_case_title, str):
+            raise PolicyProtocolError("Success Judge field answer_case_title must be a string or null")
         if not isinstance(judgment.get("reason"), str):
             raise PolicyProtocolError("Success Judge field reason must be a string")
+        if judgment["can_answer"]:
+            if not answer_case_title:
+                raise PolicyProtocolError(
+                    "Success Judge must provide answer_case_title when can_answer is true"
+                )
+            retrieved_titles = {str(case["title"]) for case in retrieved_cases}
+            if answer_case_title not in retrieved_titles:
+                raise PolicyProtocolError(
+                    "Success Judge answer_case_title must exactly match a final retrieved case title"
+                )
+        elif answer_case_title is not None:
+            raise PolicyProtocolError(
+                "Success Judge answer_case_title must be null when can_answer is false"
+            )
 
 
 JUDGE_FIELDS = (

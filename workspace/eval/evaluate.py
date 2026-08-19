@@ -24,7 +24,14 @@ WORKSPACE_DIR = EVAL_DIR.parent
 DEFAULT_TEST_ROOT = WORKSPACE_DIR / "ClarQ" / "profile_split" / "test"
 DEFAULT_CASE_DOCUMENT = WORKSPACE_DIR / "ClarQ" / "case_answers_with_title.json"
 DEFAULT_VERL_ROOT = WORKSPACE_DIR / "verl_dial-main-h800"
-OUTPUT_FILENAMES = ("trajectories.jsonl", "errors.jsonl", "metrics.json", "report.md", "run_config.json")
+OUTPUT_FILENAMES = (
+    "trajectories.jsonl",
+    "errors.jsonl",
+    "metrics.json",
+    "report.md",
+    "judge_success.json",
+    "run_config.json",
+)
 
 
 def _env(name: str, default: str | None = None) -> str | None:
@@ -397,7 +404,7 @@ def build_components(args: argparse.Namespace) -> tuple[EvaluationRunner, list[t
 
 def _run_config(args: argparse.Namespace) -> dict[str, Any]:
     return {
-        "schema_version": "2.3",
+        "schema_version": "2.4",
         "created_at": datetime.now(timezone.utc).isoformat(),
         "data": {
             "test_root": str(args.test_root),
@@ -515,11 +522,12 @@ def latest_records(records: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
 
 def _error_record(sample: EvaluationSample, error: Exception, elapsed_seconds: float) -> dict[str, Any]:
     return {
-        "schema_version": "2.3",
+        "schema_version": "2.4",
         "sample_id": sample.sample_id,
         "domain": sample.domain,
         "target_case_id": sample.target_case_id,
         "target_case_title": sample.target_case_title,
+        "target_case_content": sample.target_case_content,
         "initial_question": sample.initial_question,
         "core_intent": sample.core_intent,
         "known_info": list(sample.known_info),
@@ -536,6 +544,66 @@ def _error_record(sample: EvaluationSample, error: Exception, elapsed_seconds: f
         "judge_error": None,
         "error": {"type": type(error).__name__, "message": str(error)},
     }
+
+
+def judge_success_records(records: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Build audit records for cases selected by successful LLM Success Judges."""
+    selected: list[dict[str, Any]] = []
+    for record in records:
+        if record.get("error"):
+            continue
+        judgment = record.get("success_judgment")
+        if not isinstance(judgment, dict) or judgment.get("method") != "llm_judge":
+            continue
+        judge = judgment.get("judge")
+        if not judgment.get("success") or not isinstance(judge, dict):
+            continue
+
+        answer_case_title = judge.get("answer_case_title")
+        if not isinstance(answer_case_title, str) or not answer_case_title:
+            raise ValueError("Successful LLM Success Judge record is missing answer_case_title")
+        top_k = judgment.get("top_k")
+        if isinstance(top_k, bool) or not isinstance(top_k, int) or top_k <= 0:
+            raise ValueError("Successful LLM Success Judge record has invalid top_k")
+        answer_case = next(
+            (
+                case
+                for case in record.get("final_results", [])[:top_k]
+                if str(case.get("title") or "") == answer_case_title
+            ),
+            None,
+        )
+        if not isinstance(answer_case, dict):
+            raise ValueError(
+                "Success Judge answer_case_title is not present in the final retrieved Top-K"
+            )
+
+        initial_question = record.get("initial_question")
+        ground_truth_title = record.get("target_case_title")
+        ground_truth_content = record.get("target_case_content")
+        reason = judge.get("reason")
+        if not all(
+            isinstance(value, str)
+            for value in (initial_question, ground_truth_title, ground_truth_content, reason)
+        ):
+            raise ValueError("Successful LLM Success Judge record lacks required audit text")
+
+        selected.append(
+            {
+                "sample_id": str(record.get("sample_id") or ""),
+                "initial_question": initial_question,
+                "ground_truth_case": {
+                    "title": ground_truth_title,
+                    "content": ground_truth_content,
+                },
+                "answer_case": {
+                    "title": str(answer_case.get("title") or ""),
+                    "content": str(answer_case.get("content") or ""),
+                },
+                "reason": reason,
+            }
+        )
+    return selected
 
 
 def preflight(
@@ -629,6 +697,7 @@ def aggregate(
     )
     write_json(output_dir / "metrics.json", metrics)
     write_report(output_dir / "report.md", metrics)
+    write_json(output_dir / "judge_success.json", judge_success_records(records))
     return metrics
 
 
@@ -683,6 +752,7 @@ def run_evaluation(
     )
     write_json(args.output_dir / "metrics.json", metrics)
     write_report(args.output_dir / "report.md", metrics)
+    write_json(args.output_dir / "judge_success.json", judge_success_records(selected_records))
     return metrics
 
 

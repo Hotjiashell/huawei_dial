@@ -50,8 +50,9 @@ Success Judge 做可答性判断。Agent 轨迹结束后：
   传给独立 Success Judge；
 - Success Judge 仅判断这些案例是否能回答原始问题，并以标准案例作为预期答案范围的参考；
   不要求案例 title、ID 或关键词完全一致；
-- Success Judge 返回 `can_answer=true` 则成功，否则失败；每条轨迹最多调用一次该 Judge，
-  不在每轮或每次检索后调用；
+- Success Judge 返回 `can_answer=true` 时，还必须返回 `answer_case_title`，其值必须精确等于
+  最终 Top-$K_s$ 中某个案例的 title，用于指出哪条案例可回答问题；`can_answer=false` 时
+  `answer_case_title` 必须为 `null`。每条轨迹最多调用一次该 Judge，不在每轮或每次检索后调用；
 - 不要求策略以严格文本 `Complete` 结束。`Complete` 率作为独立的协议/效率指标报告。
 
 令 $r_i$ 为标准案例 title 在最终检索结果中的排名（未命中时为 0），令 $j_i$ 为未命中时
@@ -64,9 +65,12 @@ SuccessRate = \frac{1}{N}\sum_{i=1}^{N}
 
 Success Judge 输出不是合法 JSON、字段类型不符合约束或服务请求失败时，样本按基础设施失败
 处理，而不是静默记为失败。每条完成轨迹保存结构化 `success_judgment`，离线聚合只读取该结论，
-不会再次调用模型。Recall@K、MRR 和追问增益仍单独报告。测试数据中的 `case_id` 只用于解析
-标准案例和轨迹审计。标准案例 title 或内容解析失败时样本不能进入在线评估；缺少
-`success_judgment` 的旧轨迹不能按新口径离线聚合。
+不会再次调用模型。`judge_success.json` 会从最新轨迹重建，只包含 Judge 判定成功的样本，
+并保留原始问题、标准案例 title/content、Judge 选中案例 title/content 及理由。Recall@K、MRR
+和追问增益仍单独报告。测试数据中的 `case_id` 只用于解析标准案例和轨迹审计。标准案例 title
+或内容解析失败时样本不能进入在线评估；缺少 `success_judgment` 的旧轨迹不能按新口径离线聚合。
+此外，早于 schema 2.4 的 LLM Judge 成功记录没有 Judge 选中的案例标题和标准案例内容，不能按
+当前 Success Judge 协议聚合，也无法重建审计文件。
 
 ### MRR
 

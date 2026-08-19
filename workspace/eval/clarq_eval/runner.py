@@ -369,11 +369,12 @@ class EvaluationRunner:
             break
 
         result: dict[str, Any] = {
-            "schema_version": "2.3",
+            "schema_version": "2.4",
             "sample_id": sample.sample_id,
             "domain": sample.domain,
             "target_case_id": sample.target_case_id,
             "target_case_title": sample.target_case_title,
+            "target_case_content": sample.target_case_content,
             "initial_question": sample.initial_question,
             "core_intent": sample.core_intent,
             "known_info": list(sample.known_info),

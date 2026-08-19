@@ -60,14 +60,26 @@ class UserSimulatorTests(unittest.TestCase):
 
 class SuccessJudgeTests(unittest.TestCase):
     def test_prompt_contains_question_reference_and_retrieved_case_content(self) -> None:
-        client = FakeChatClient(content='{"can_answer": true, "reason": "The retrieved solution applies."}')
+        client = FakeChatClient(
+            content=(
+                '{"can_answer": true, "answer_case_title": "Retrieved title", '
+                '"reason": "The retrieved solution applies."}'
+            )
+        )
 
         judgment = SuccessJudge(client).judge(
             SAMPLE,
             [{"case_id": "ignored", "title": "Retrieved title", "content": "Retrieved solution"}],
         )
 
-        self.assertEqual(judgment, {"can_answer": True, "reason": "The retrieved solution applies."})
+        self.assertEqual(
+            judgment,
+            {
+                "can_answer": True,
+                "answer_case_title": "Retrieved title",
+                "reason": "The retrieved solution applies.",
+            },
+        )
         messages, kwargs = client.calls[0]
         prompt = messages[0]["content"]
         self.assertIn("initial question", prompt)
@@ -85,7 +97,18 @@ class SuccessJudgeTests(unittest.TestCase):
                 self.calls.append((messages, kwargs))
                 if len(self.calls) == 1:
                     raise ChatAPIError("unsupported response format", status_code=400)
-                return {"choices": [{"message": {"content": '{"can_answer": false, "reason": "No match."}'}}]}
+                return {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": (
+                                    '{"can_answer": false, "answer_case_title": null, '
+                                    '"reason": "No match."}'
+                                )
+                            }
+                        }
+                    ]
+                }
 
         client = SchemaRejectingClient()
         judgment = SuccessJudge(client).judge(SAMPLE, [{"title": "Other", "content": "Other answer"}])
@@ -96,10 +119,27 @@ class SuccessJudgeTests(unittest.TestCase):
 
     def test_invalid_output_is_rejected(self) -> None:
         with self.assertRaisesRegex(Exception, "can_answer"):
-            SuccessJudge(FakeChatClient(content='{"can_answer": "yes", "reason": "bad type"}')).judge(
+            SuccessJudge(
+                FakeChatClient(
+                    content=(
+                        '{"can_answer": "yes", "answer_case_title": null, "reason": "bad type"}'
+                    )
+                )
+            ).judge(
                 SAMPLE,
                 [{"title": "Other", "content": "Other answer"}],
             )
+
+    def test_selected_case_title_must_match_a_retrieved_case(self) -> None:
+        with self.assertRaisesRegex(Exception, "answer_case_title"):
+            SuccessJudge(
+                FakeChatClient(
+                    content=(
+                        '{"can_answer": true, "answer_case_title": "Invented title", '
+                        '"reason": "bad selection"}'
+                    )
+                )
+            ).judge(SAMPLE, [{"title": "Other", "content": "Other answer"}])
 
 
 class TrajectoryJudgeTests(unittest.TestCase):

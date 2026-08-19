@@ -116,17 +116,21 @@ python3 workspace/eval/evaluate.py \
 程序会从原运行配置校验已保存的 `top_k` 和 `success_top_k`，拒绝计算超出轨迹保留深度的 K；
 `--max-turns` 未指定时也会沿用原运行配置。正常在线运行出现基础设施失败时退出码为 2，质量指标会
 排除这些样本；临时实验可用 `--allow-infrastructure-failures` 允许零退出码，但正式报告应先
-恢复失败样本。旧版轨迹没有保存 `success_judgment` 或 `target_case_title`，无法离线
-推导当前口径的 Success/Recall，聚合时会明确报错，需要重新执行评估。更换案例文档后
+恢复失败样本。缺少 `success_judgment` 或 `target_case_title` 的旧版轨迹无法离线推导当前
+Success/Recall。早于 schema 2.4 的 LLM Success Judge 成功记录还缺少 Judge 选中的案例标题和
+标准案例内容，无法按当前协议聚合或重建 `judge_success.json`，需要重新执行评估。更换案例文档后
 也必须使用新的输出目录，或重新完整评估。
 
 ## 产物
 
 - `trajectories.jsonl`：完整对话、工具调用、检索列表、停止原因、
-  标准 `target_case_title`、结构化 `success_judgment`、耗时和可选轨迹 Judge 结果；
+  标准 `target_case_title` / `target_case_content`、结构化 `success_judgment`、耗时和可选轨迹 Judge 结果；
 - `errors.jsonl`：有基础设施失败时生成的错误历史；
 - `metrics.json`：机器可读总体、分领域指标及 Wilson 95% 置信区间；
 - `report.md`：中文汇总报告；
+- `judge_success.json`：仅收录 LLM Success Judge 判定成功的样本；每项包含原始问题、
+  标准案例 title/content、Judge 选中的可回答案例 title/content 和 Judge 理由。标准案例
+  直接命中的成功不会调用 LLM，因此不在该文件中；
 - `run_config.json`：不含凭据的可复现配置。
 
 策略请求默认关闭 Qwen thinking，并发送标准 OpenAI tools、`tool_choice=auto` 和

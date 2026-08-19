@@ -19,6 +19,7 @@ from evaluate import (
     _run_config,
     aggregate,
     latest_records,
+    judge_success_records,
     parse_args,
     preflight,
     run_evaluation,
@@ -32,6 +33,8 @@ def successful_result(sample: EvaluationSample) -> dict:
         "domain": sample.domain,
         "target_case_id": sample.target_case_id,
         "target_case_title": sample.target_case_title,
+        "target_case_content": sample.target_case_content,
+        "initial_question": sample.initial_question,
         "baseline_results": [],
         "events": [
             {
@@ -242,8 +245,67 @@ class ModelAndReportingTests(unittest.TestCase):
             self.assertEqual(rebuilt["overall"]["result"]["success_rate"], 1.0)
             self.assertTrue((output_dir / "metrics.json").is_file())
             self.assertTrue((output_dir / "report.md").is_file())
+            self.assertEqual(
+                json.loads((output_dir / "judge_success.json").read_text(encoding="utf-8")), []
+            )
             write_report(output_dir / "manual.md", metrics)
             self.assertTrue((output_dir / "manual.md").is_file())
+
+    def test_judge_success_output_contains_selected_case_and_reason(self) -> None:
+        sample = EvaluationSample(
+            "one",
+            "money",
+            "target",
+            "How do I solve this?",
+            "intent",
+            (),
+            "Canonical title",
+            "Canonical answer",
+        )
+        result = successful_result(sample)
+        result["final_results"] = [
+            {
+                "case_id": "equivalent",
+                "title": "Equivalent title",
+                "content": "Equivalent solution content",
+            }
+        ]
+        result["success_judgment"] = {
+            "success": True,
+            "method": "llm_judge",
+            "top_k": 3,
+            "ground_truth_rank": 0,
+            "judge": {
+                "can_answer": True,
+                "answer_case_title": "Equivalent title",
+                "reason": "It gives the same applicable procedure.",
+            },
+        }
+
+        expected = [
+            {
+                "sample_id": "one",
+                "initial_question": "How do I solve this?",
+                "ground_truth_case": {
+                    "title": "Canonical title",
+                    "content": "Canonical answer",
+                },
+                "answer_case": {
+                    "title": "Equivalent title",
+                    "content": "Equivalent solution content",
+                },
+                "reason": "It gives the same applicable procedure.",
+            }
+        ]
+        self.assertEqual(judge_success_records([result]), expected)
+
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = Path(directory)
+            append_jsonl(output_dir / "trajectories.jsonl", result)
+            aggregate(output_dir, (1, 3), 2)
+            self.assertEqual(
+                json.loads((output_dir / "judge_success.json").read_text(encoding="utf-8")), expected
+            )
 
     def test_aggregate_cli_does_not_require_online_services(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -371,6 +433,9 @@ class ModelAndReportingTests(unittest.TestCase):
             self.assertEqual(retry_metrics["overall"]["sample_counts"]["infrastructure_failures"], 0)
             self.assertEqual(retry_metrics["overall"]["result"]["success_rate"], 1.0)
             self.assertEqual(len(read_jsonl(Path(directory) / "trajectories.jsonl")), 3)
+            self.assertEqual(
+                json.loads((Path(directory) / "judge_success.json").read_text(encoding="utf-8")), []
+            )
 
     def test_preflight_deduplicates_shared_model_and_rejects_empty_index(self) -> None:
         sample = EvaluationSample("one", "money", "target", "question", "intent", (), "Target title")
