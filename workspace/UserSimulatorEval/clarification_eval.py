@@ -260,6 +260,10 @@ class LLMJudge:
         payload = {
             "model": self.model_name,
             "temperature": 0,
+            # ``extra_body={"chat_template_kwargs": ...}`` in the OpenAI SDK
+            # is serialised as this top-level OpenAI-compatible extension.
+            # Disable Qwen/VLLM thinking so Judge output remains concise JSON.
+            "chat_template_kwargs": {"enable_thinking": False},
             "messages": [
                 {"role": "system", "content": JUDGE_SYSTEM_PROMPT},
                 {"role": "user", "content": build_judge_prompt(turns)},

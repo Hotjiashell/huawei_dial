@@ -38,8 +38,9 @@ python3 clarification_eval.py diveUserData/dialog.json
 ```
 
 本地 OpenAI-compatible 服务如果不需要鉴权，可以省略 `--api-key`。请求默认使用
-`temperature=0`，先尝试 `response_format={"type":"json_object"}`，若服务不支持会自动
-回退到普通请求。网络失败或服务返回非 JSON 时会重试；可用 `--timeout` 和
+`temperature=0`，并向兼容 Qwen/vLLM 的接口发送
+`chat_template_kwargs={"enable_thinking": false}` 以关闭思考模式；先尝试
+`response_format={"type":"json_object"}`，若服务不支持会自动回退到普通请求。网络失败或服务返回非 JSON 时会重试；可用 `--timeout` 和
 `--max-retries` 调整。
 
 默认最多同时发起 4 个 Judge 请求；可用 `--workers N`（或 `--concurrency N`）调整，
