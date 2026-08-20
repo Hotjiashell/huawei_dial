@@ -133,3 +133,46 @@ Python 调用时同样可以指定并发数：
 ```python
 report = evaluate_dialogues(dialogues, judge, workers=8)
 ```
+
+## 类人用户特征挖掘
+
+`clarification_feature_mining.py` 读取 `clarification_eval.py` 的 JSON 输出，且**只处理**其中已确认
+`clarification_pairs` 非空的对话。它按输入顺序串行调用模型，让模型在每一段对话中：
+
+1. 自主归纳可帮助模拟器表现得更像人的用户行为；
+2. 将每个澄清问题-用户回答配对归入此前已总结的行为类别，或在确实无法复用时创建新类别；
+3. 对每个归类和模拟建议提供问题/回答原文证据与理由。
+
+模型不会重新识别澄清配对，而是使用前一阶段确认好的问题/回答配对和完整上下文。类别库会随对话逐条积累，常见的行为包括但不预设为限：回答具体程度、部分回答、补充背景、表达不确定、纠正问题前提、反问、回避、重复与情绪化表达。
+
+```bash
+python3 clarification_feature_mining.py \
+  clarification_eval.json \
+  --url https://api.example.com/v1 \
+  --model-name Qwen/Qwen3.6-27B \
+  --api-key "$YOUR_API_KEY" \
+  --output clarification_feature_mining.json
+```
+
+该脚本固定为串行处理，不提供 `--workers`。每次请求都发送
+`chat_template_kwargs={"enable_thinking": false}`，并首先尝试 JSON Object 模式；服务不支持时会自动回退到普通请求。
+
+默认输出会在每段对话结束或失败后立即以原子方式写盘。结果文件保存：
+
+- `category_catalog`：累计的行为类别、定义、模拟建议、出现次数和示例证据；
+- `dialogue_analyses`：每段对话的原始澄清配对、调用前类别库、完整请求、所有请求尝试、原始模型响应、模型判断、规范化判断与校验警告；
+- `errors`：失败对话的请求内容、请求尝试和错误原因；
+- `summary`：可处理对话/配对数、已完成数、类别数、归类次数和错误数。
+
+中断后可使用 `--resume` 从同一输出文件继续，已经完成的 `record_index` 会跳过；失败过但尚未成功的对话会重试：
+
+```bash
+python3 clarification_feature_mining.py clarification_eval.json \
+  --url https://api.example.com/v1 \
+  --model-name Qwen/Qwen3.6-27B \
+  --api-key "$YOUR_API_KEY" \
+  --output clarification_feature_mining.json \
+  --resume
+```
+
+已有输出文件时，第一次重跑会拒绝覆盖，避免丢失过程记录；可以明确使用 `--overwrite` 重新开始。`--max-categories-in-prompt`（默认 100）限制每次给模型的历史类别数量，类别过多时优先提供出现频率高且近期出现的类别。单次请求的 `--timeout`、`--max-retries`、`--temperature` 与 `--max-tokens` 均可调整；单条失败默认记录并继续，`--fail-fast` 可改为首次失败停止。
