@@ -176,3 +176,39 @@ python3 clarification_feature_mining.py clarification_eval.json \
 ```
 
 已有输出文件时，第一次重跑会拒绝覆盖，避免丢失过程记录；可以明确使用 `--overwrite` 重新开始。`--max-categories-in-prompt`（默认 100）限制每次给模型的历史类别数量，类别过多时优先提供出现频率高且近期出现的类别。单次请求的 `--timeout`、`--max-retries`、`--temperature` 与 `--max-tokens` 均可调整；单条失败默认记录并继续，`--fail-fast` 可改为首次失败停止。
+
+## 澄清对话分类统计
+
+`clarification_category_stats.py` 读取 `clarification_eval.py` 的 JSON 输出，并只选择已经确认有
+`clarification_pairs` 的对话。`clarification_pairs` 只用于脚本筛选入选对话，绝不会传给模型；模型输入中的对话数据仅为完整的 `turns`，从而可以判断“否定此前信息、修正需求”这类需要前后文的类别。
+
+分类定义运行时从 [clarification.md](clarification.md) 的编号列表读取。当前文件的第 1 条会成为
+`category_1`，第 2 条会成为 `category_2`，以此类推。模型会为每个对话选择至少一个类别，可以多选，并且必须为每个类别输出理由。
+
+```bash
+python3 clarification_category_stats.py \
+  clarification_eval.json \
+  --url https://api.example.com/v1 \
+  --model-name Qwen/Qwen3.6-27B \
+  --api-key "$YOUR_API_KEY" \
+  --output clarification_category_stats.json
+```
+
+脚本固定为串行处理，并在每段对话完成或失败后原子写入结果。请求默认关闭 Qwen/vLLM 思考模式，发送
+`chat_template_kwargs={"enable_thinking": false}`。可用 `--categories path/to/clarification.md` 指定其他类别文件。
+
+输出 JSON **仅有两块**：
+
+- `category_distribution`：每个类别的 `dialogue_count` 和 `dialogue_rate_among_classified`。同一对话同一类别只计一次；类别允许重叠，因此各计数之和可以大于已成功分类的对话数。比例的分母为成功获得模型分类的入选对话数。
+- `dialogue_classifications`：每个入选对话的完整文本、分类类别和理由。单条调用失败也会在此列表保留 `status: "failed"` 和错误原因，但不会计入第一块的类别数量。
+
+如果中断或有单条失败，可以从已有输出继续；已经成功分类的对话会跳过，失败项会重新尝试：
+
+```bash
+python3 clarification_category_stats.py clarification_eval.json \
+  --url https://api.example.com/v1 \
+  --model-name Qwen/Qwen3.6-27B \
+  --api-key "$YOUR_API_KEY" \
+  --output clarification_category_stats.json \
+  --resume
+```
