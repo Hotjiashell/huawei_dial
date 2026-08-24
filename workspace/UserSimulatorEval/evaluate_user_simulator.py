@@ -193,6 +193,7 @@ class ClarqSimulatorAdapter:
         if str(eval_directory) not in sys.path:
             sys.path.insert(0, str(eval_directory))
         try:
+            from clarq_eval.clients import INVALID_CLARIFICATION_RESPONSE
             from clarq_eval.clients import OpenAIChatClient as ClarqOpenAIChatClient
             from clarq_eval.clients import UserSimulator
             from clarq_eval.models import EvaluationSample
@@ -201,6 +202,7 @@ class ClarqSimulatorAdapter:
             raise RuntimeError("无法导入 workspace/eval 的 ClarQ 用户模拟器实现") from error
 
         self._sample_type = EvaluationSample
+        self._programmatic_invalid_reply = INVALID_CLARIFICATION_RESPONSE
         client = ClarqOpenAIChatClient(
             base_url=base_url,
             model=model,
@@ -243,7 +245,15 @@ class ClarqSimulatorAdapter:
         reply = str(getattr(raw_reply, "text", raw_reply)).strip()
         if not reply:
             raise RuntimeError("ClarQ 用户模拟器返回空回复")
-        result: dict[str, Any] = {"reply": reply, "adapter": self.kind}
+        result: dict[str, Any] = {
+            "reply": reply,
+            "adapter": self.kind,
+            # This sentence is produced by UserSimulator.answer() itself when
+            # the selector marks the question INVALID_QUESTION. It is not a
+            # language-model rendering and therefore must not skew the reply-
+            # length comparison with human language.
+            "programmatic_invalid_clarification_response": reply == self._programmatic_invalid_reply,
+        }
         behavior = getattr(raw_reply, "behavior", None)
         source_fact = getattr(raw_reply, "source_known_info", None)
         clarification_type = getattr(raw_reply, "clarification_type", None)
@@ -292,15 +302,25 @@ def aggregate(scores: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     information_points = sum(int(score.get("information_point_count", 0)) for score in scores)
     leakage_count = sum(1 for score in scores if score.get("has_unasked_information"))
     non_response_count = sum(1 for score in scores if score.get("non_response"))
-    total_length = sum(int(score.get("reply_length_characters", 0)) for score in scores)
+    length_scores = [score for score in scores if not score.get("exclude_from_average_reply_length")]
+    total_length = sum(int(score.get("reply_length_characters", 0)) for score in length_scores)
+    excluded_programmatic_invalid_count = sum(
+        1
+        for score in scores
+        if score.get("reply_length_exclusion_reason") == "programmatic_invalid_clarification_response"
+    )
     return {
         "evaluated_reply_count": total,
         "total_information_point_count": information_points,
         "information_efficiency_average_points_per_reply": information_points / total if total else 0.0,
         "answers_with_unasked_information_count": leakage_count,
         "information_leakage_rate": leakage_count / total if total else 0.0,
+        "reply_length_included_reply_count": len(length_scores),
+        "programmatic_invalid_clarification_reply_excluded_from_length_count": (
+            excluded_programmatic_invalid_count
+        ),
         "total_reply_length_characters": total_length,
-        "average_reply_length_characters": total_length / total if total else 0.0,
+        "average_reply_length_characters": total_length / len(length_scores) if length_scores else 0.0,
         "non_response_count": non_response_count,
         "non_response_rate": non_response_count / total if total else 0.0,
     }
@@ -476,9 +496,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                 real_scores.append(record["real_user"])
             if simulator is not None:
                 generated = simulator.generate(sample)
+                simulator_evaluation = judge_reply(sample, generated["reply"], judge)
+                if generated.get("programmatic_invalid_clarification_response"):
+                    simulator_evaluation["exclude_from_average_reply_length"] = True
+                    simulator_evaluation["reply_length_exclusion_reason"] = (
+                        "programmatic_invalid_clarification_response"
+                    )
                 record["simulator"] = {
                     "generation": generated,
-                    "evaluation": judge_reply(sample, generated["reply"], judge),
+                    "evaluation": simulator_evaluation,
                 }
                 simulator_scores.append(record["simulator"]["evaluation"])
             records.append(record)
