@@ -15,6 +15,7 @@ from urllib.parse import urlsplit, urlunsplit
 from clarq_eval.clients import OpenAIChatClient, SuccessJudge, TrajectoryJudge, UserSimulator
 from clarq_eval.metrics import summarize_results
 from clarq_eval.models import EvaluationSample, load_case_documents, load_samples
+from clarq_eval.random_user_simulator import RandomUserSimulator, RandomUserSimulatorConfig
 from clarq_eval.reporting import append_jsonl, read_jsonl, write_json, write_report
 from clarq_eval.runner import EvaluationRunner
 
@@ -142,6 +143,45 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=int(_env("USER_SIMULATOR_MAX_RETRIES", "3")),
     )
+    parser.add_argument(
+        "--user-simulator-mode",
+        "--user-simulator",
+        dest="user_simulator_mode",
+        choices=("grounded", "random"),
+        default=_env("EVAL_USER_SIMULATOR_MODE", _env("EVAL_USER_SIMULATOR", "grounded")),
+        help="User simulator behavior: grounded uses the training-compatible selector; random samples variants.",
+    )
+    random_simulator_seed = _env("EVAL_RANDOM_USER_SIMULATOR_SEED")
+    parser.add_argument(
+        "--random-user-simulator-seed",
+        type=int,
+        default=int(random_simulator_seed) if random_simulator_seed else None,
+        help="Sampling seed for random user simulation; defaults to --seed.",
+    )
+    parser.add_argument(
+        "--random-user-rephrase-probability",
+        type=float,
+        default=float(_env("EVAL_RANDOM_USER_REPHRASE_PROBABILITY", "0.16")),
+        help="Chance that a random simulated user rephrases the original question instead of answering.",
+    )
+    parser.add_argument(
+        "--random-user-compress-known-probability",
+        type=float,
+        default=float(_env("EVAL_RANDOM_USER_COMPRESS_KNOWN_PROBABILITY", "0.79")),
+        help="Chance to make a second LLM call that compresses a known fact into a short reply.",
+    )
+    parser.add_argument(
+        "--random-user-proactive-known-on-unknown",
+        action=argparse.BooleanOptionalAction,
+        default=_env_bool("EVAL_RANDOM_USER_PROACTIVE_KNOWN_ON_UNKNOWN", True),
+        help="Allow unknown answers to volunteer one randomly selected known fact.",
+    )
+    parser.add_argument(
+        "--random-user-proactive-known-probability",
+        type=float,
+        default=float(_env("EVAL_RANDOM_USER_PROACTIVE_KNOWN_PROBABILITY", "0.47")),
+        help="Chance to make a second LLM call that selects a known fact to volunteer after UNKNOWN.",
+    )
 
     parser.add_argument("--judge-base-url", default=_env("JUDGE_BASE_URL"))
     parser.add_argument("--judge-model", default=_env("JUDGE_MODEL"))
@@ -257,6 +297,16 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         parser.error("--offset must be non-negative")
     if args.limit is not None and args.limit <= 0:
         parser.error("--limit must be positive")
+    for field in (
+        "random_user_rephrase_probability",
+        "random_user_compress_known_probability",
+        "random_user_proactive_known_probability",
+    ):
+        value = getattr(args, field)
+        if not 0.0 <= value <= 1.0:
+            parser.error(f"--{field.replace('_', '-')} must be between 0 and 1")
+    if args.random_user_simulator_seed is None:
+        args.random_user_simulator_seed = args.seed
     required_depth = max(args.k_values)
     if not args.aggregate_only and args.top_k < required_depth:
         parser.error(f"--top-k must be at least {required_depth} for the configured metrics")
@@ -385,7 +435,20 @@ def build_components(args: argparse.Namespace) -> tuple[EvaluationRunner, list[t
     retriever = _load_retriever(args)
     runner = EvaluationRunner(
         policy_client=policy_client,
-        user_simulator=UserSimulator(simulator_client),
+        user_simulator=(
+            UserSimulator(simulator_client)
+            if args.user_simulator_mode == "grounded"
+            else RandomUserSimulator(
+                simulator_client,
+                RandomUserSimulatorConfig(
+                    seed=args.random_user_simulator_seed,
+                    rephrase_question_probability=args.random_user_rephrase_probability,
+                    compress_known_info_probability=args.random_user_compress_known_probability,
+                    enable_proactive_known_info_on_unknown=args.random_user_proactive_known_on_unknown,
+                    proactive_known_info_probability=args.random_user_proactive_known_probability,
+                ),
+            )
+        ),
         retriever=retriever,
         success_judge=SuccessJudge(success_judge_client),
         judge=judge,
@@ -404,7 +467,7 @@ def build_components(args: argparse.Namespace) -> tuple[EvaluationRunner, list[t
 
 def _run_config(args: argparse.Namespace) -> dict[str, Any]:
     return {
-        "schema_version": "2.4",
+        "schema_version": "2.5",
         "created_at": datetime.now(timezone.utc).isoformat(),
         "data": {
             "test_root": str(args.test_root),
@@ -440,6 +503,22 @@ def _run_config(args: argparse.Namespace) -> dict[str, Any]:
             "user_simulator": {
                 "base_url": _redact_url(args.simulator_base_url),
                 "model": args.simulator_model,
+                "mode": args.user_simulator_mode,
+                "random_sampling": (
+                    {
+                        "seed": args.random_user_simulator_seed,
+                        "rephrase_question_probability": args.random_user_rephrase_probability,
+                        "compress_known_info_probability": args.random_user_compress_known_probability,
+                        "enable_proactive_known_info_on_unknown": (
+                            args.random_user_proactive_known_on_unknown
+                        ),
+                        "proactive_known_info_probability": (
+                            args.random_user_proactive_known_probability
+                        ),
+                    }
+                    if args.user_simulator_mode == "random"
+                    else None
+                ),
             },
             "judge": None
             if args.skip_judge
@@ -522,7 +601,7 @@ def latest_records(records: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
 
 def _error_record(sample: EvaluationSample, error: Exception, elapsed_seconds: float) -> dict[str, Any]:
     return {
-        "schema_version": "2.4",
+        "schema_version": "2.5",
         "sample_id": sample.sample_id,
         "domain": sample.domain,
         "target_case_id": sample.target_case_id,

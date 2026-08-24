@@ -398,6 +398,47 @@ class ModelAndReportingTests(unittest.TestCase):
                 ]
             )
 
+    def test_random_user_simulator_cli_and_run_config(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            args = parse_args(
+                [
+                    "--output-dir",
+                    directory,
+                    "--policy-base-url",
+                    "http://policy/v1",
+                    "--policy-model",
+                    "policy",
+                    "--simulator-model",
+                    "simulator",
+                    "--user-simulator",
+                    "random",
+                    "--seed",
+                    "99",
+                    "--random-user-rephrase-probability",
+                    "0.16",
+                    "--random-user-compress-known-probability",
+                    "0.79",
+                    "--random-user-proactive-known-probability",
+                    "0.47",
+                ]
+            )
+
+        self.assertEqual(args.user_simulator_mode, "random")
+        self.assertEqual(args.random_user_simulator_seed, 99)
+        self.assertTrue(args.random_user_proactive_known_on_unknown)
+        simulation = _run_config(args)["services"]["user_simulator"]
+        self.assertEqual(simulation["mode"], "random")
+        self.assertEqual(
+            simulation["random_sampling"],
+            {
+                "seed": 99,
+                "rephrase_question_probability": 0.16,
+                "compress_known_info_probability": 0.79,
+                "enable_proactive_known_info_on_unknown": True,
+                "proactive_known_info_probability": 0.47,
+            },
+        )
+
     def test_execution_resume_retries_only_latest_failure(self) -> None:
         samples = [
             EvaluationSample(

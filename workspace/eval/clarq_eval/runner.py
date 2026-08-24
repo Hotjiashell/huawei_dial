@@ -11,7 +11,6 @@ from .clients import (
     OpenAIChatClient,
     SuccessJudge,
     TrajectoryJudge,
-    UserSimulator,
 )
 from .models import EvaluationSample
 from .parsing import canonical_assistant_message, parse_policy_response
@@ -77,6 +76,10 @@ class Retriever(Protocol):
     def search(self, query: str, max_results: int | None = None) -> list[Any]: ...
 
 
+class UserSimulatorProtocol(Protocol):
+    def answer(self, sample: EvaluationSample, question: str) -> Any: ...
+
+
 def _result_value(result: Any, attribute: str, *dictionary_keys: str, default: Any = "") -> Any:
     if hasattr(result, attribute):
         return getattr(result, attribute)
@@ -139,7 +142,7 @@ class EvaluationRunner:
         self,
         *,
         policy_client: OpenAIChatClient,
-        user_simulator: UserSimulator,
+        user_simulator: UserSimulatorProtocol,
         retriever: Retriever,
         success_judge: SuccessJudge,
         judge: TrajectoryJudge | None = None,
@@ -269,8 +272,21 @@ class EvaluationRunner:
                     clarification_before_titles = [case["title"] for case in last_search_results]
                 pending_clarifications += 1
 
-                reply = self.user_simulator.answer(sample, question)
-                if reply in sample.known_info:
+                simulator_reply = self.user_simulator.answer(sample, question)
+                reply = str(getattr(simulator_reply, "text", simulator_reply))
+                sampled_clarification_type = getattr(simulator_reply, "clarification_type", None)
+                sampled_behavior = getattr(simulator_reply, "behavior", None)
+                source_known_info = getattr(simulator_reply, "source_known_info", None)
+                if sampled_clarification_type == "known_info":
+                    useful_clarification_count += 1
+                    clarification_type = "known_info"
+                elif sampled_clarification_type == "invalid":
+                    invalid_clarification_count += 1
+                    clarification_type = "invalid"
+                elif sampled_clarification_type == "unknown":
+                    unknown_clarification_count += 1
+                    clarification_type = "unknown"
+                elif reply in sample.known_info:
                     useful_clarification_count += 1
                     clarification_type = "known_info"
                 elif reply == INVALID_CLARIFICATION_RESPONSE:
@@ -288,6 +304,10 @@ class EvaluationRunner:
                         "duplicate_question": is_duplicate,
                     }
                 )
+                if isinstance(sampled_behavior, str) and sampled_behavior:
+                    event["user_simulator_behavior"] = sampled_behavior
+                if isinstance(source_known_info, str) and source_known_info:
+                    event["user_simulator_source_known_info"] = source_known_info
                 messages.append(
                     {
                         "role": "tool",
@@ -369,7 +389,7 @@ class EvaluationRunner:
             break
 
         result: dict[str, Any] = {
-            "schema_version": "2.4",
+            "schema_version": "2.5",
             "sample_id": sample.sample_id,
             "domain": sample.domain,
             "target_case_id": sample.target_case_id,

@@ -5,6 +5,7 @@ import unittest
 import _bootstrap  # noqa: F401
 
 from clarq_eval.models import EvaluationSample
+from clarq_eval.random_user_simulator import RandomUserSimulatorReply
 from clarq_eval.runner import EvaluationRunner
 
 
@@ -60,6 +61,16 @@ class FakeSimulator:
 
     def answer(self, sample: EvaluationSample, question: str) -> str:
         return self.responses[question]
+
+
+class FakeRandomSimulator:
+    def answer(self, sample: EvaluationSample, question: str) -> RandomUserSimulatorReply:
+        return RandomUserSimulatorReply(
+            text="Android 14.",
+            clarification_type="known_info",
+            behavior="compressed_known_info",
+            source_known_info="Version 2",
+        )
 
 
 class FakeSuccessJudge:
@@ -242,6 +253,30 @@ class EvaluationRunnerTests(unittest.TestCase):
         self.assertEqual(result["success_judgment"]["method"], "ground_truth_top_k")
         self.assertEqual([query for query, _ in retriever.calls], ["initial question", "query one"])
         self.assertEqual(success_judge.calls, [])
+
+    def test_random_simulator_metadata_preserves_known_info_metric_classification(self) -> None:
+        runner = EvaluationRunner(
+            policy_client=FakePolicy(
+                [
+                    tool_response("clarify_user", {"question": "Which version?"}),
+                    complete_response(),
+                ]
+            ),
+            user_simulator=FakeRandomSimulator(),
+            retriever=FakeRetriever({"initial question": [case("baseline")]}),
+            success_judge=FakeSuccessJudge(can_answer=False),
+            max_turns=3,
+        )
+
+        result = runner.run(SAMPLE)
+
+        self.assertEqual(result["useful_clarification_count"], 1)
+        self.assertEqual(result["unknown_clarification_count"], 0)
+        event = result["events"][0]
+        self.assertEqual(event["tool_response"], "Android 14.")
+        self.assertEqual(event["clarification_type"], "known_info")
+        self.assertEqual(event["user_simulator_behavior"], "compressed_known_info")
+        self.assertEqual(event["user_simulator_source_known_info"], "Version 2")
 
     def test_runner_validates_success_top_k(self) -> None:
         with self.assertRaisesRegex(ValueError, "success_top_k"):

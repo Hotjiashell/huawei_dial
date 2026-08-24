@@ -90,6 +90,34 @@ workspace/eval/run_evaluation.sh \
   --output-dir workspace/eval/outputs/subset
 ```
 
+### 用户模拟器模式
+
+默认的 `grounded` 模式与训练期口径一致：模型只能从直接回答追问的 `known_info`、`UNKNOWN`
+或 `INVALID_QUESTION` 中选择。使用随机模式可评估策略在多样用户表达下的稳健性：
+
+```bash
+workspace/eval/run_evaluation.sh \
+  --user-simulator random \
+  --random-user-simulator-seed 42 \
+  --output-dir workspace/eval/outputs/random-user-smoke
+```
+
+随机模式针对每个“样本 + 追问”以稳定随机种子独立采样，因此改变 worker 数量不会改变采样的
+行为类别。默认采样规则为：
+
+- 16%：不回答 Agent 的追问，只用短句改述原始用户问题；
+- 其余情况先由训练同款受约束选择器判断该追问是否存在直接对应的 `known_info`；
+- 若存在对应事实，79% 的概率额外调用一次模型，把这条 `known_info` 压缩成回答追问的短句；
+- 若不存在对应事实，且启用主动反馈选项，47% 的概率额外调用一次模型，从所有 `known_info`
+  中随机选一条主动反馈；否则返回 `I don't know.`。
+
+选项 `--random-user-rephrase-probability`、`--random-user-compress-known-probability`、
+`--random-user-proactive-known-probability` 和
+`--[no-]random-user-proactive-known-on-unknown` 可调整这些行为。每个追问事件会在
+`trajectories.jsonl` 记录 `user_simulator_behavior`；压缩回答和主动反馈仍标记为
+`known_info`，因此不会被误计为未知回答。上述命令行参数也可通过 `config.example.env` 中的
+`EVAL_RANDOM_USER_*` 环境变量设置。
+
 ## 断点续跑与离线重算
 
 轨迹按完成顺序实时追加并 `fsync` 到 `trajectories.jsonl`。中断后使用原参数和原目录：
