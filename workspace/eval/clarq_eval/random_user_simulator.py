@@ -116,6 +116,10 @@ compressed reply: 域账号
 question: 你是用的什么手机呢？
 known fact: 使用的是苹果手机
 compressed reply: 苹果
+3.
+question: 你是需要接黄吗？
+known fact: 需要将工作站的网络接入黄区
+compressed reply: 是的
 """
 
     PROACTIVE_KNOWN_INFO_PROMPT = """You are simulating a user in a support conversation.
