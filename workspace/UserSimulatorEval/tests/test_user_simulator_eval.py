@@ -1,0 +1,105 @@
+from __future__ import annotations
+
+import json
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from build_test_set import candidate_interactions, make_test_record  # noqa: E402
+from evaluate_user_simulator import aggregate, normalise_metric_judgement  # noqa: E402
+from user_simulator_eval_common import OpenAIChatClient, load_json_records  # noqa: E402
+
+
+class UserSimulatorEvalTests(unittest.TestCase):
+    def test_concatenated_json_objects_and_complete_flow_filter(self) -> None:
+        """The actual source export can contain ``}{`` without newlines."""
+
+        raw = (
+            '{"call_sno":1,"chat_content":"用户：无法登录\\n客服：请问您使用什么设备？\\n用户：Windows 电脑",'
+            '"context":"无法登录","known_info":["无法登录"]}'
+            '{"call_sno":2,"chat_content":"用户：还有问题","known_info":[]}'
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "dialog.json"
+            source.write_text(raw, encoding="utf-8")
+            records = load_json_records(source)
+
+        self.assertEqual(2, len(records))
+        candidates = candidate_interactions(records)
+        self.assertEqual(1, len(candidates))
+        candidate = candidates[0]
+        self.assertEqual("无法登录", candidate["initial_question"])
+        self.assertEqual("请问您使用什么设备？", candidate["clarification_question"])
+        self.assertEqual("Windows 电脑", candidate["human_response"])
+
+    def test_test_record_keeps_original_and_added_known_info_separate(self) -> None:
+        candidate = {
+            "sample_id": "dialog-1-q1",
+            "source": {},
+            "initial_question": "无法登录",
+            "existing_known_info": ["无法登录", "无法登录"],
+            "clarification_question": "使用什么设备？",
+            "human_response": "Windows 电脑",
+            "evidence_turns": [],
+        }
+        record = make_test_record(
+            candidate,
+            {
+                "added_known_info": ["用户使用 Windows 电脑", "无法登录"],
+                "reason": "用户明确说使用 Windows 电脑",
+            },
+        )
+        self.assertEqual(["无法登录"], record["original_known_info"])
+        self.assertEqual(["用户使用 Windows 电脑"], record["added_known_info"])
+        self.assertEqual(["无法登录", "用户使用 Windows 电脑"], record["known_info"])
+
+    def test_metric_normalisation_and_aggregation(self) -> None:
+        first = normalise_metric_judgement(
+            {
+                "non_response": False,
+                "reason": "回答了设备，额外说了地点",
+                "information_points": [
+                    {"text": "使用 Windows 电脑", "requested_by_agent": True},
+                    {"text": "位于红区", "requested_by_agent": False},
+                    {"text": "使用 Windows 电脑", "requested_by_agent": True},
+                ],
+            }
+        )
+        first["reply_length_characters"] = 10
+        second = normalise_metric_judgement(
+            {"non_response": True, "information_points": []}
+        )
+        second["reply_length_characters"] = 4
+        summary = aggregate([first, second])
+        self.assertEqual(2, summary["evaluated_reply_count"])
+        self.assertEqual(1.0, summary["information_efficiency_average_points_per_reply"])
+        self.assertEqual(0.5, summary["information_leakage_rate"])
+        self.assertEqual(7.0, summary["average_reply_length_characters"])
+        self.assertEqual(0.5, summary["non_response_rate"])
+
+    def test_chat_request_disables_thinking_and_falls_back_json_mode(self) -> None:
+        client = OpenAIChatClient("http://example.test/v1", "fake-model", max_retries=0)
+        submitted: list[dict[str, object]] = []
+
+        def fake_post(body: dict[str, object]) -> str:
+            submitted.append(body)
+            if "response_format" in body:
+                raise RuntimeError("server does not support json mode")
+            return json.dumps({"ok": True})
+
+        client._post = fake_post  # type: ignore[method-assign]
+        response = client.chat([{"role": "user", "content": "测试"}], json_object=True)
+        self.assertEqual({"ok": True}, response["json"])
+        self.assertEqual(2, len(submitted))
+        for body in submitted:
+            self.assertEqual({"enable_thinking": False}, body["chat_template_kwargs"])
+
+
+if __name__ == "__main__":
+    unittest.main()

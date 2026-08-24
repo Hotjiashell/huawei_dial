@@ -1,0 +1,2 @@
+{"call_sno": 1, "chat_content": "用户：连不上网\n客服：请问你在哪个工作区\n用户：红区", "context": "连不上网", "known_info":["电脑连不上网", "电脑位于红区"], "core_intent": "想把电脑连上网"}
+{"call_sno": 2, "chat_content": "用户：电脑坏了\n用户：找谁修", "context":"电脑坏了找谁修", "known_info":["电脑坏了"], "core_intent": "想把电脑修好"}

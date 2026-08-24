@@ -26,7 +26,7 @@ from typing import Any, Mapping, Sequence
 from urllib import error as urlerror
 from urllib import request as urlrequest
 
-from clarification_eval import _content_to_text, extract_json_object, resolve_endpoint
+from workspace.UserSimulatorEval.explore.clarification_eval import _content_to_text, extract_json_object, resolve_endpoint
 
 
 FORMAT_VERSION = 1

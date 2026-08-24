@@ -1,5 +1,128 @@
 # 澄清反问用户回答评估
 
+## 用户模拟器类人性测试集与评测
+
+新增的两段式流程用于科学比较真实用户与用户模拟器的澄清回复行为：
+
+```text
+真实 chat_content
+  → build_test_set.py
+  → user_simulator_test_set.jsonl
+  → evaluate_user_simulator.py --mode both
+  → 真实用户 / 模拟器的并列指标与逐条审计结果
+```
+
+### 1. 构建测试集
+
+[`build_test_set.py`](build_test_set.py) 从 `explore/diveUserData/dialog.json` 抽取一条条评测样本。
+输入支持 JSON 数组、正常 JSONL，以及历史导出中出现的多个 JSON 对象直接拼接（`}{`）的格式。
+
+只有 `chat_content` 中实际出现下列完整结构时才可能入选：
+
+```text
+用户初始问题 → 客服澄清反问 → 紧接的用户真实回复
+```
+
+具体而言，聊天记录中必须有用户的开场发言（允许此前有一条客服欢迎语）；客服问题后必须紧接一段
+用户发言。初始问题取自 `chat_content` 的开场连续用户发言，绝不由 `context` 元数据补造；
+`context` / `core_intent` 只作为来源审计信息保留。用户“我不知道”或“只重申需求”的真实回复也会
+保留，因为它们正是不回复率要测量的对象。
+
+抽取默认会调用 LLM 做二次质检：确认客服问题确为澄清反问，并仅从原始对话和用户已有事实中
+补齐支持真实回复所需的 `known_info`。所有新提示词均为中文，请求固定携带：
+
+```json
+"chat_template_kwargs": {"enable_thinking": false}
+```
+
+示例：
+
+```bash
+export USER_SIMULATOR_EVAL_JUDGE_URL='http://127.0.0.1:8000/v1'
+export USER_SIMULATOR_EVAL_JUDGE_MODEL='your-judge-model'
+
+python3 workspace/UserSimulatorEval/build_test_set.py \
+  workspace/UserSimulatorEval/explore/diveUserData/dialog.json \
+  --output workspace/UserSimulatorEval/data/user_simulator_test_set.jsonl \
+  --report workspace/UserSimulatorEval/data/user_simulator_test_set.report.json
+```
+
+首次仅想检查结构候选、暂不请求模型时，可显式使用：
+
+```bash
+python3 workspace/UserSimulatorEval/build_test_set.py \
+  --skip-llm-review \
+  --output workspace/UserSimulatorEval/data/user_simulator_test_set.jsonl
+```
+
+这种结构模式不会验证“是否真是澄清反问”，也不会补充缺失的 `known_info`，只能用于本地检查，
+不应作为正式评测集。
+
+输出的每一行都是一个 JSON 样本，主要字段为：
+
+```json
+{
+  "sample_id": "dialog-1-q1",
+  "initial_question": "连不上网",
+  "known_info": ["电脑连不上网", "电脑位于红区"],
+  "original_known_info": ["电脑连不上网", "电脑位于红区"],
+  "added_known_info": [],
+  "clarification_question": "请问你在哪个工作区",
+  "human_response": "红区",
+  "evidence_turns": []
+}
+```
+
+`evidence_turns`、`source` 和 `extraction.review_reason` 用于审计每条数据的来源和事实补齐理由。
+
+### 2. 评测真实用户与模拟器
+
+[`evaluate_user_simulator.py`](evaluate_user_simulator.py) 使用同一个中文 LLM Judge 对回复标注信息点、
+是否未经追问而泄漏信息、以及是否完全无视追问。四项本地汇总指标的正式定义见
+[`metric.md`](metric.md)。
+
+先只建立真实用户基线：
+
+```bash
+python3 workspace/UserSimulatorEval/evaluate_user_simulator.py \
+  workspace/UserSimulatorEval/data/user_simulator_test_set.jsonl \
+  --mode real \
+  --judge-url "$USER_SIMULATOR_EVAL_JUDGE_URL" \
+  --judge-model "$USER_SIMULATOR_EVAL_JUDGE_MODEL" \
+  --output workspace/UserSimulatorEval/outputs/real_user_baseline.json
+```
+
+再让用户模拟器生成回复并与真实用户并列比较：
+
+```bash
+python3 workspace/UserSimulatorEval/evaluate_user_simulator.py \
+  workspace/UserSimulatorEval/data/user_simulator_test_set.jsonl \
+  --mode both \
+  --judge-url "$USER_SIMULATOR_EVAL_JUDGE_URL" \
+  --judge-model "$USER_SIMULATOR_EVAL_JUDGE_MODEL" \
+  --simulator-url 'http://127.0.0.1:8005/v1' \
+  --simulator-model 'clarq-user-simulator' \
+  --output workspace/UserSimulatorEval/outputs/compare.json
+```
+
+默认的 `--simulator-adapter clarq_random` 会**直接调用**
+`workspace/eval/clarq_eval/random_user_simulator.py` 中当前的随机用户模拟器（16% 重述、79% 压缩已知
+事实、未知时 47% 主动反馈等默认行为），因此测到的是实际评测链路中的用户模拟器，而非另写一个近似
+prompt。可用 `--simulator-adapter clarq_grounded` 测训练兼容的基础模拟器；两种方式均沿用
+`--model-mode {qwen3,qwen3_5}` 的关闭思考逻辑。
+
+如果被测对象是一个独立的、自然语言输出的用户模拟器服务，可改用：
+
+```bash
+--simulator-adapter natural_prompt \
+--simulator-system-prompt-file path/to/your_simulator_prompt.txt
+```
+
+该 adapter 的默认 system prompt 为中文，要求模型仅基于 `known_info` 自然回答当前澄清问题。所有接口
+请求仍默认关闭思考。输出会保留每条生成回复、模拟器行为元数据、Judge 原始 JSON、信息点、未被追问
+的信息点、长度和不回复判断，并在 `metrics` 中给出真实用户、模拟器及四项主要指标的差值。不会将它们
+擅自合成为单一类人分数。
+
 `clarification_eval.py` 使用一个可配置的 LLM Judge，从客服对话中识别：
 
 1. 客服提出了澄清反问，且用户随后确实回答的配对数量；

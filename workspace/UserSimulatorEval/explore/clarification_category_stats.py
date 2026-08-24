@@ -21,7 +21,7 @@ from typing import Any, Mapping, Sequence
 from urllib import error as urlerror
 from urllib import request as urlrequest
 
-from clarification_eval import _content_to_text, extract_json_object, resolve_endpoint
+from workspace.UserSimulatorEval.explore.clarification_eval import _content_to_text, extract_json_object, resolve_endpoint
 
 
 CLASSIFICATION_SYSTEM_PROMPT = """你是客服对话分析专家。请根据输入提供的 classification_categories，对完整客服对话中的用户行为进行多标签分类。
