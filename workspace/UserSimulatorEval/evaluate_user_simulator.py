@@ -194,6 +194,7 @@ class ClarqSimulatorAdapter:
             sys.path.insert(0, str(eval_directory))
         try:
             from clarq_eval.clients import INVALID_CLARIFICATION_RESPONSE
+            from clarq_eval.clients import UNKNOWN_CLARIFICATION_RESPONSE
             from clarq_eval.clients import OpenAIChatClient as ClarqOpenAIChatClient
             from clarq_eval.clients import UserSimulator
             from clarq_eval.models import EvaluationSample
@@ -203,6 +204,7 @@ class ClarqSimulatorAdapter:
 
         self._sample_type = EvaluationSample
         self._programmatic_invalid_reply = INVALID_CLARIFICATION_RESPONSE
+        self._programmatic_unknown_reply = UNKNOWN_CLARIFICATION_RESPONSE
         client = ClarqOpenAIChatClient(
             base_url=base_url,
             model=model,
@@ -245,14 +247,20 @@ class ClarqSimulatorAdapter:
         reply = str(getattr(raw_reply, "text", raw_reply)).strip()
         if not reply:
             raise RuntimeError("ClarQ 用户模拟器返回空回复")
+        programmatic_response_kind: str | None = None
+        if reply == self._programmatic_invalid_reply:
+            programmatic_response_kind = "invalid_clarification"
+        elif reply == self._programmatic_unknown_reply:
+            programmatic_response_kind = "unknown"
         result: dict[str, Any] = {
             "reply": reply,
             "adapter": self.kind,
-            # This sentence is produced by UserSimulator.answer() itself when
-            # the selector marks the question INVALID_QUESTION. It is not a
-            # language-model rendering and therefore must not skew the reply-
-            # length comparison with human language.
-            "programmatic_invalid_clarification_response": reply == self._programmatic_invalid_reply,
+            # Both values are emitted by UserSimulator.answer() after a
+            # constrained selector result. They are not LLM renderings and
+            # must not skew natural-language reply-length comparisons.
+            "programmatic_response_kind": programmatic_response_kind,
+            "programmatic_invalid_clarification_response": programmatic_response_kind == "invalid_clarification",
+            "programmatic_unknown_response": programmatic_response_kind == "unknown",
         }
         behavior = getattr(raw_reply, "behavior", None)
         source_fact = getattr(raw_reply, "source_known_info", None)
@@ -309,6 +317,11 @@ def aggregate(scores: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         for score in scores
         if score.get("reply_length_exclusion_reason") == "programmatic_invalid_clarification_response"
     )
+    excluded_programmatic_unknown_count = sum(
+        1
+        for score in scores
+        if score.get("reply_length_exclusion_reason") == "programmatic_unknown_response"
+    )
     return {
         "evaluated_reply_count": total,
         "total_information_point_count": information_points,
@@ -318,6 +331,10 @@ def aggregate(scores: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         "reply_length_included_reply_count": len(length_scores),
         "programmatic_invalid_clarification_reply_excluded_from_length_count": (
             excluded_programmatic_invalid_count
+        ),
+        "programmatic_unknown_reply_excluded_from_length_count": excluded_programmatic_unknown_count,
+        "programmatic_reply_excluded_from_length_count": (
+            excluded_programmatic_invalid_count + excluded_programmatic_unknown_count
         ),
         "total_reply_length_characters": total_length,
         "average_reply_length_characters": total_length / len(length_scores) if length_scores else 0.0,
@@ -497,11 +514,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             if simulator is not None:
                 generated = simulator.generate(sample)
                 simulator_evaluation = judge_reply(sample, generated["reply"], judge)
-                if generated.get("programmatic_invalid_clarification_response"):
+                programmatic_response_kind = generated.get("programmatic_response_kind")
+                if programmatic_response_kind in {"invalid_clarification", "unknown"}:
                     simulator_evaluation["exclude_from_average_reply_length"] = True
-                    simulator_evaluation["reply_length_exclusion_reason"] = (
-                        "programmatic_invalid_clarification_response"
-                    )
+                    simulator_evaluation["reply_length_exclusion_reason"] = f"programmatic_{programmatic_response_kind}_response"
                 record["simulator"] = {
                     "generation": generated,
                     "evaluation": simulator_evaluation,

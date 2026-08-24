@@ -20,8 +20,9 @@
 
    使用字符而不是 tokenizer token，避免不同模型、不同 tokenizer 导致数值不可比。
    对 `clarq_grounded` 和 `clarq_random`，如果用户模拟器因程序判定追问无效而固定返回
-   `This is not a reasonable clarification question. I refuse to answer.`，该条不计入回复长度的
-   分子或分母；它不是模型生成的自然语言。评测输出会分别记录参与长度统计的条数和被排除的条数。
+   `This is not a reasonable clarification question. I refuse to answer.`，或因程序判定用户未知而固定返回
+   `I don't know.`，该条均不计入回复长度的分子或分母；它们不是模型生成的自然语言。评测输出会分别
+   记录参与长度统计的条数、两类固定回复的排除数量及总排除数量。
 
 4. **不回复率**：用户没有回应客服澄清问题、而只是重申或改述初始需求的回复占比。
 
@@ -36,4 +37,3 @@
 - 信息提供效率、回复长度接近真实用户，通常表示回复粒度相近；但不是越大越好；
 - 信息泄漏率和不回复率应与真实用户分布接近，不能机械追求零；
 - 所有 Judge 标注、逐条信息点与理由都应随评测结果落盘，以便人工审计。
-

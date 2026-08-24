@@ -94,14 +94,22 @@ class UserSimulatorEvalTests(unittest.TestCase):
         second["reply_length_characters"] = 4
         second["exclude_from_average_reply_length"] = True
         second["reply_length_exclusion_reason"] = "programmatic_invalid_clarification_response"
-        summary = aggregate([first, second])
-        self.assertEqual(2, summary["evaluated_reply_count"])
-        self.assertEqual(1.0, summary["information_efficiency_average_points_per_reply"])
-        self.assertEqual(0.5, summary["information_leakage_rate"])
+        third = normalise_metric_judgement(
+            {"non_response": False, "information_points": []}
+        )
+        third["reply_length_characters"] = 12
+        third["exclude_from_average_reply_length"] = True
+        third["reply_length_exclusion_reason"] = "programmatic_unknown_response"
+        summary = aggregate([first, second, third])
+        self.assertEqual(3, summary["evaluated_reply_count"])
+        self.assertEqual(2 / 3, summary["information_efficiency_average_points_per_reply"])
+        self.assertEqual(1 / 3, summary["information_leakage_rate"])
         self.assertEqual(1, summary["reply_length_included_reply_count"])
         self.assertEqual(1, summary["programmatic_invalid_clarification_reply_excluded_from_length_count"])
+        self.assertEqual(1, summary["programmatic_unknown_reply_excluded_from_length_count"])
+        self.assertEqual(2, summary["programmatic_reply_excluded_from_length_count"])
         self.assertEqual(10.0, summary["average_reply_length_characters"])
-        self.assertEqual(0.5, summary["non_response_rate"])
+        self.assertEqual(1 / 3, summary["non_response_rate"])
 
     def test_chat_request_disables_thinking_and_falls_back_json_mode(self) -> None:
         client = OpenAIChatClient("http://example.test/v1", "fake-model", max_retries=0)
