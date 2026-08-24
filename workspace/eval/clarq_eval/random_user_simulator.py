@@ -34,7 +34,7 @@ class RandomUserSimulatorConfig:
     """Sampling parameters for :class:`RandomUserSimulator`."""
 
     seed: int | None = 42
-    rephrase_question_probability: float = 0.05
+    rephrase_question_probability: float = 0.04
     compress_known_info_probability: float = 0.79
     enable_proactive_known_info_on_unknown: bool = True
     proactive_known_info_probability: float = 0.47
