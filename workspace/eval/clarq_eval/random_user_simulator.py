@@ -34,7 +34,7 @@ class RandomUserSimulatorConfig:
     """Sampling parameters for :class:`RandomUserSimulator`."""
 
     seed: int | None = 42
-    rephrase_question_probability: float = 0.16
+    rephrase_question_probability: float = 0.05
     compress_known_info_probability: float = 0.79
     enable_proactive_known_info_on_unknown: bool = True
     proactive_known_info_probability: float = 0.47
@@ -64,7 +64,7 @@ class RandomUserSimulator:
 
     Sampling order for each clarification is:
 
-    1. With ``rephrase_question_probability`` (default 16%), ask the LLM to
+    1. With ``rephrase_question_probability`` (default 5%), ask the LLM to
        rephrase the original user question and deliberately not answer the
        Agent's clarification.
     2. Otherwise use the regular constrained selector to determine whether a
