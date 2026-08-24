@@ -66,6 +66,26 @@ python3 workspace/UserSimulatorEval/build_test_set.py \
 
 ### 2. 评测真实用户与模拟器
 
+如果测试集中的 `human_response` 含有多行，只想保留第一次换行前的用户回复，可以使用
+[`trim_human_responses.py`](trim_human_responses.py)：
+
+```bash
+python3 workspace/UserSimulatorEval/trim_human_responses.py \
+  workspace/UserSimulatorEval/data/user_simulator_test_set.jsonl \
+  --output workspace/UserSimulatorEval/data/user_simulator_test_set.first_line.jsonl
+```
+
+脚本只修改 `human_response`，其他字段、样本顺序和 JSONL 行数保持不变。默认不会覆盖已有文件；
+如果确认要直接修改原测试集，可以显式使用：
+
+```bash
+python3 workspace/UserSimulatorEval/trim_human_responses.py \
+  workspace/UserSimulatorEval/data/user_simulator_test_set.jsonl \
+  --in-place
+```
+
+`--in-place` 使用临时文件原子替换输入文件；也可以用 `--overwrite` 覆盖指定的已有输出文件。
+
 [`evaluate_user_simulator.py`](evaluate_user_simulator.py) 使用同一个中文 LLM Judge 对回复标注信息点、
 是否未经追问而泄漏信息、以及是否完全无视追问。四项本地汇总指标的正式定义见
 [`metric.md`](metric.md)。

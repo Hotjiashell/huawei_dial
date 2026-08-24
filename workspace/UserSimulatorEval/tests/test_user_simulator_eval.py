@@ -13,10 +13,28 @@ if str(ROOT) not in sys.path:
 
 from build_test_set import dialogue_inputs, make_test_record, normalise_review  # noqa: E402
 from evaluate_user_simulator import aggregate, normalise_metric_judgement  # noqa: E402
+from trim_human_responses import first_line, trim_records  # noqa: E402
 from user_simulator_eval_common import OpenAIChatClient, load_json_records  # noqa: E402
 
 
 class UserSimulatorEvalTests(unittest.TestCase):
+    def test_trim_human_response_at_first_newline(self) -> None:
+        self.assertEqual("第一句", first_line("第一句\n第二句"))
+        self.assertEqual("第一句", first_line("第一句\r\n第二句"))
+        self.assertEqual("第一句", first_line("第一句\r第二句"))
+        self.assertEqual("没有换行", first_line("没有换行"))
+
+        records, changed = trim_records(
+            [
+                {"sample_id": "1", "human_response": "回答第一行\n回答第二行", "known_info": ["事实"]},
+                {"sample_id": "2", "human_response": "单行回复"},
+            ]
+        )
+        self.assertEqual(1, changed)
+        self.assertEqual("回答第一行", records[0]["human_response"])
+        self.assertEqual(["事实"], records[0]["known_info"])
+        self.assertEqual("单行回复", records[1]["human_response"])
+
     def test_concatenated_json_objects_are_all_sent_to_the_llm(self) -> None:
         """The extractor must not structurally pre-filter incomplete chats."""
 
