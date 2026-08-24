@@ -130,10 +130,16 @@ Known facts:
         self,
         client: OpenAIChatClient,
         config: RandomUserSimulatorConfig | None = None,
+        *,
+        model_mode: str = "qwen3_5",
+        tokenizer_path: str | None = None,
     ):
-        self.client = client
         self.config = config or RandomUserSimulatorConfig()
-        self._grounded_selector = UserSimulator(client)
+        self._grounded_selector = UserSimulator(
+            client,
+            model_mode=model_mode,
+            tokenizer_path=tokenizer_path,
+        )
 
     def answer(self, sample: EvaluationSample, question: str) -> RandomUserSimulatorReply:
         """Return one sampled user reply for an Agent clarification question."""
@@ -230,7 +236,7 @@ Known facts:
             question=question,
             known_info=known_info,
         )
-        response = self.client.chat(
+        response = self._grounded_selector.chat_without_thinking(
             [{"role": "user", "content": prompt}],
             temperature=1.0,
             max_tokens=16,
@@ -256,7 +262,7 @@ Known facts:
         *,
         temperature: float,
     ) -> str:
-        response = self.client.chat(
+        response = self._grounded_selector.chat_without_thinking(
             [{"role": "user", "content": prompt}],
             temperature=temperature,
             max_tokens=64,

@@ -389,7 +389,7 @@ class EvaluationRunner:
             break
 
         result: dict[str, Any] = {
-            "schema_version": "2.5",
+            "schema_version": "2.6",
             "sample_id": sample.sample_id,
             "domain": sample.domain,
             "target_case_id": sample.target_case_id,

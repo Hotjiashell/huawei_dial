@@ -144,6 +144,25 @@ def build_parser() -> argparse.ArgumentParser:
         default=int(_env("USER_SIMULATOR_MAX_RETRIES", "3")),
     )
     parser.add_argument(
+        "--model-mode",
+        "--user-simulator-model-mode",
+        dest="model_mode",
+        choices=("qwen3", "qwen3_5"),
+        default=_env("USER_SIMULATOR_MODEL_MODE", "qwen3_5"),
+        help=(
+            "User simulator model family used to disable thinking: qwen3 applies the tokenizer "
+            "chat template locally; qwen3_5 uses chat_template_kwargs."
+        ),
+    )
+    parser.add_argument(
+        "--simulator-tokenizer-path",
+        default=_env("USER_SIMULATOR_TOKENIZER_PATH"),
+        help=(
+            "Local Qwen3 tokenizer directory or Hugging Face identifier. Used only when --model-mode qwen3; "
+            "defaults to --simulator-model."
+        ),
+    )
+    parser.add_argument(
         "--user-simulator-mode",
         "--user-simulator",
         dest="user_simulator_mode",
@@ -436,7 +455,11 @@ def build_components(args: argparse.Namespace) -> tuple[EvaluationRunner, list[t
     runner = EvaluationRunner(
         policy_client=policy_client,
         user_simulator=(
-            UserSimulator(simulator_client)
+            UserSimulator(
+                simulator_client,
+                model_mode=args.model_mode,
+                tokenizer_path=args.simulator_tokenizer_path,
+            )
             if args.user_simulator_mode == "grounded"
             else RandomUserSimulator(
                 simulator_client,
@@ -447,6 +470,8 @@ def build_components(args: argparse.Namespace) -> tuple[EvaluationRunner, list[t
                     enable_proactive_known_info_on_unknown=args.random_user_proactive_known_on_unknown,
                     proactive_known_info_probability=args.random_user_proactive_known_probability,
                 ),
+                model_mode=args.model_mode,
+                tokenizer_path=args.simulator_tokenizer_path,
             )
         ),
         retriever=retriever,
@@ -467,7 +492,7 @@ def build_components(args: argparse.Namespace) -> tuple[EvaluationRunner, list[t
 
 def _run_config(args: argparse.Namespace) -> dict[str, Any]:
     return {
-        "schema_version": "2.5",
+        "schema_version": "2.6",
         "created_at": datetime.now(timezone.utc).isoformat(),
         "data": {
             "test_root": str(args.test_root),
@@ -503,6 +528,8 @@ def _run_config(args: argparse.Namespace) -> dict[str, Any]:
             "user_simulator": {
                 "base_url": _redact_url(args.simulator_base_url),
                 "model": args.simulator_model,
+                "model_mode": args.model_mode,
+                "tokenizer_path": args.simulator_tokenizer_path,
                 "mode": args.user_simulator_mode,
                 "random_sampling": (
                     {
@@ -601,7 +628,7 @@ def latest_records(records: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
 
 def _error_record(sample: EvaluationSample, error: Exception, elapsed_seconds: float) -> dict[str, Any]:
     return {
-        "schema_version": "2.5",
+        "schema_version": "2.6",
         "sample_id": sample.sample_id,
         "domain": sample.domain,
         "target_case_id": sample.target_case_id,

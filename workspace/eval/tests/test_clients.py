@@ -6,9 +6,11 @@ import _bootstrap  # noqa: F401
 
 from clarq_eval.clients import (
     ChatAPIError,
+    OpenAIChatClient,
     SuccessJudge,
     TrajectoryJudge,
     UserSimulator,
+    response_content,
 )
 from clarq_eval.models import EvaluationSample
 
@@ -37,6 +39,25 @@ class FakeChatClient:
             raise self.error
         return {"choices": [{"message": {"content": self.content}}]}
 
+
+class RecordingOpenAIChatClient(OpenAIChatClient):
+    def __init__(self) -> None:
+        super().__init__("http://service/v1", "Qwen/Qwen3-32B")
+        self.requests: list[tuple[str, str, dict | None]] = []
+
+    def _request(self, method: str, url: str, json_body: dict | None = None) -> dict:
+        self.requests.append((method, url, json_body))
+        return {"choices": [{"text": "KNOWN_INFO_1"}]}
+
+
+class FakeTokenizer:
+    def __init__(self) -> None:
+        self.calls: list[tuple[list[dict], dict]] = []
+
+    def apply_chat_template(self, messages: list[dict], **kwargs) -> str:
+        self.calls.append((messages, kwargs))
+        return "<qwen3-rendered-prompt>"
+
 class UserSimulatorTests(unittest.TestCase):
     def test_clarification_reply_uses_allowed_selection(self) -> None:
         client = FakeChatClient(content="KNOWN_INFO_1")
@@ -56,6 +77,72 @@ class UserSimulatorTests(unittest.TestCase):
         messages, kwargs = client.calls[0]
         self.assertIn("Initial user question", messages[0]["content"])
         self.assertEqual(kwargs["max_tokens"], 16)
+
+    def test_qwen3_uses_tokenizer_template_and_completions_endpoint(self) -> None:
+        client = RecordingOpenAIChatClient()
+        tokenizer = FakeTokenizer()
+        client._tokenizer_cache["/models/qwen3"] = tokenizer
+
+        response = client.user_simulator_chat(
+            [{"role": "user", "content": "hello"}],
+            model_mode="qwen3",
+            tokenizer_path="/models/qwen3",
+            max_tokens=16,
+            extra_payload={
+                "chat_template_kwargs": {"enable_thinking": True},
+                "structured_outputs": {"choice": ["KNOWN_INFO_1"]},
+            },
+        )
+
+        self.assertEqual(response_content(response), "KNOWN_INFO_1")
+        self.assertEqual(tokenizer.calls[0][0], [{"role": "user", "content": "hello"}])
+        self.assertEqual(tokenizer.calls[0][1]["enable_thinking"], False)
+        self.assertTrue(tokenizer.calls[0][1]["add_generation_prompt"])
+        _, url, body = client.requests[0]
+        self.assertTrue(url.endswith("/completions"))
+        self.assertEqual(body["prompt"], "<qwen3-rendered-prompt>")
+        self.assertNotIn("chat_template_kwargs", body)
+        self.assertEqual(body["structured_outputs"], {"choice": ["KNOWN_INFO_1"]})
+
+    def test_qwen3_user_simulator_uses_the_model_mode_request_path(self) -> None:
+        client = RecordingOpenAIChatClient()
+        tokenizer = FakeTokenizer()
+        client._tokenizer_cache["/models/qwen3"] = tokenizer
+        sample = EvaluationSample(
+            sample_id="sample-1",
+            domain="money",
+            target_case_id="target",
+            initial_question="initial question",
+            core_intent="core intent",
+            known_info=("Version 2",),
+        )
+
+        reply = UserSimulator(
+            client,
+            model_mode="qwen3",
+            tokenizer_path="/models/qwen3",
+        ).answer(sample, "Which version?")
+
+        self.assertEqual(reply, "Version 2")
+        self.assertEqual(tokenizer.calls[0][1]["enable_thinking"], False)
+        _, url, body = client.requests[0]
+        self.assertTrue(url.endswith("/completions"))
+        self.assertEqual(body["structured_outputs"], {"choice": ["KNOWN_INFO_1", "UNKNOWN", "INVALID_QUESTION"]})
+
+    def test_qwen3_5_uses_chat_template_kwargs_on_chat_completions(self) -> None:
+        client = RecordingOpenAIChatClient()
+
+        client.user_simulator_chat(
+            [{"role": "user", "content": "hello"}],
+            model_mode="qwen3_5",
+            max_tokens=16,
+            extra_payload={"chat_template_kwargs": {"enable_thinking": True}},
+        )
+
+        _, url, body = client.requests[0]
+        self.assertTrue(url.endswith("/chat/completions"))
+        self.assertEqual(body["messages"], [{"role": "user", "content": "hello"}])
+        self.assertEqual(body["chat_template_kwargs"], {"enable_thinking": False})
 
 
 class SuccessJudgeTests(unittest.TestCase):

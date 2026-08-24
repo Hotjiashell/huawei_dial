@@ -398,7 +398,7 @@ def summarize_results(
     }
     resolved_success_top_k = overall["result"]["success_top_k"]
     return {
-        "schema_version": "2.5",
+        "schema_version": "2.6",
         "metric_config": {
             "k_values": list(normalized_k),
             "max_turns": max_turns,

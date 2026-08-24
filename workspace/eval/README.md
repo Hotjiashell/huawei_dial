@@ -49,6 +49,27 @@ cp workspace/eval/config.example.env workspace/eval/.env
 - 可选的独立轨迹质量 Judge。未配置时默认复用用户模拟器，使用 `--skip-judge` 可关闭；
   该参数不会关闭正式 Success Judge。
 
+### 用户模拟器模型模式
+
+`--model-mode` 只影响用户模拟器（包括随机用户模拟器的额外调用），用于按模型家族关闭
+thinking；默认是 `qwen3_5`：
+
+- `qwen3_5`：请求 `/chat/completions`，并在请求体中传入
+  `chat_template_kwargs: {"enable_thinking": false}`；
+- `qwen3`：本地使用 Qwen3 tokenizer 执行
+  `tokenizer.apply_chat_template(messages, enable_thinking=False)`，再把渲染后的 prompt 请求到
+  `/completions`。该模式需要安装 `transformers`，并能从 `--simulator-tokenizer-path`（若未设置则
+  使用 `--simulator-model`）加载 tokenizer。
+
+例如，使用本地 Qwen3 tokenizer：
+
+```bash
+workspace/eval/run_evaluation.sh \
+  --model-mode qwen3 \
+  --simulator-tokenizer-path /models/Qwen3-32B \
+  --output-dir workspace/eval/outputs/qwen3-simulator-smoke
+```
+
 ## 运行
 
 先做连通性检查。该命令会检查各模型的 `/models`，并用测试集第一条问题执行一次

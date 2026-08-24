@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import time
+from threading import Lock
 from typing import Any
 
 from .models import EvaluationSample
@@ -32,6 +33,8 @@ class OpenAIChatClient:
         self.api_key = api_key or "EMPTY"
         self.timeout = timeout
         self.max_retries = max(1, max_retries)
+        self._tokenizer_cache: dict[str, Any] = {}
+        self._tokenizer_lock = Lock()
 
     @property
     def headers(self) -> dict[str, str]:
@@ -63,6 +66,109 @@ class OpenAIChatClient:
         if extra_payload:
             body.update(extra_payload)
         return self._request("POST", f"{self.base_url}/chat/completions", json_body=body)
+
+    def completion(
+        self,
+        prompt: str,
+        *,
+        temperature: float = 0.0,
+        max_tokens: int = 512,
+        seed: int | None = None,
+        extra_payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Submit a raw prompt to the OpenAI-compatible completions endpoint."""
+        body: dict[str, Any] = {
+            "model": self.model,
+            "prompt": prompt,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }
+        if seed is not None:
+            body["seed"] = seed
+        if extra_payload:
+            body.update(extra_payload)
+        return self._request("POST", f"{self.base_url}/completions", json_body=body)
+
+    def user_simulator_chat(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        model_mode: str = "qwen3_5",
+        tokenizer_path: str | None = None,
+        temperature: float = 0.0,
+        max_tokens: int = 512,
+        seed: int | None = None,
+        extra_payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Call a user simulator while disabling Qwen thinking for its model family.
+
+        Qwen3.5-compatible serving stacks support the OpenAI chat-completions
+        ``chat_template_kwargs`` extension.  Qwen3 needs the chat template to
+        be rendered locally with ``enable_thinking=False`` before sending the
+        raw prompt to the completions endpoint.
+        """
+        if model_mode == "qwen3_5":
+            payload = dict(extra_payload or {})
+            template_kwargs = dict(payload.get("chat_template_kwargs") or {})
+            template_kwargs["enable_thinking"] = False
+            payload["chat_template_kwargs"] = template_kwargs
+            return self.chat(
+                messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                seed=seed,
+                extra_payload=payload,
+            )
+        if model_mode == "qwen3":
+            prompt = self._apply_qwen3_chat_template(messages, tokenizer_path)
+            payload = dict(extra_payload or {})
+            payload.pop("chat_template_kwargs", None)
+            return self.completion(
+                prompt,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                seed=seed,
+                extra_payload=payload,
+            )
+        raise ValueError(f"Unsupported user simulator model_mode: {model_mode!r}")
+
+    def _apply_qwen3_chat_template(
+        self,
+        messages: list[dict[str, Any]],
+        tokenizer_path: str | None,
+    ) -> str:
+        source = str(tokenizer_path or self.model).strip()
+        if not source:
+            raise ValueError("A tokenizer path or user simulator model is required for model_mode=qwen3")
+        with self._tokenizer_lock:
+            tokenizer = self._tokenizer_cache.get(source)
+            if tokenizer is None:
+                try:
+                    from transformers import AutoTokenizer
+                except ModuleNotFoundError as error:
+                    raise ChatAPIError(
+                        "model_mode=qwen3 requires transformers so the tokenizer can apply its chat template"
+                    ) from error
+                try:
+                    tokenizer = AutoTokenizer.from_pretrained(source, trust_remote_code=True)
+                except Exception as error:
+                    raise ChatAPIError(
+                        f"Unable to load Qwen3 tokenizer from {source!r}; "
+                        "set --simulator-tokenizer-path to a local tokenizer directory"
+                    ) from error
+                self._tokenizer_cache[source] = tokenizer
+        try:
+            text = tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+                enable_thinking=False,
+            )
+        except Exception as error:
+            raise ChatAPIError("Failed to apply the Qwen3 chat template with thinking disabled") from error
+        if not isinstance(text, str) or not text:
+            raise ChatAPIError("Qwen3 tokenizer returned an empty non-text chat template")
+        return text
 
     def health_check(self) -> dict[str, Any]:
         return self._request("GET", f"{self.base_url}/models")
@@ -116,9 +222,18 @@ class OpenAIChatClient:
 
 def response_content(response: dict[str, Any]) -> str:
     try:
-        content = response["choices"][0]["message"].get("content")
+        choice = response["choices"][0]
     except (KeyError, IndexError, TypeError) as error:
-        raise PolicyProtocolError("Chat response has no choices[0].message.content") from error
+        raise PolicyProtocolError("Model response has no choices[0]") from error
+    if not isinstance(choice, dict):
+        raise PolicyProtocolError("Model response choices[0] must be an object")
+    message = choice.get("message")
+    if isinstance(message, dict):
+        content = message.get("content")
+    elif "text" in choice:
+        content = choice["text"]
+    else:
+        raise PolicyProtocolError("Model response has neither choices[0].message.content nor choices[0].text")
     return "" if content is None else str(content).strip()
 
 
@@ -143,8 +258,53 @@ Rules:
 - Never infer or invent a fact. Output one allowed choice and nothing else.
 """
 
-    def __init__(self, client: OpenAIChatClient):
+    def __init__(
+        self,
+        client: OpenAIChatClient,
+        *,
+        model_mode: str = "qwen3_5",
+        tokenizer_path: str | None = None,
+    ):
+        if model_mode not in {"qwen3", "qwen3_5"}:
+            raise ValueError("UserSimulator model_mode must be qwen3 or qwen3_5")
         self.client = client
+        self.model_mode = model_mode
+        self.tokenizer_path = tokenizer_path
+
+    def chat_without_thinking(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        temperature: float,
+        max_tokens: int,
+        seed: int | None = None,
+        extra_payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Use the configured model family's no-thinking request convention."""
+        method = getattr(self.client, "user_simulator_chat", None)
+        if callable(method):
+            return method(
+                messages,
+                model_mode=self.model_mode,
+                tokenizer_path=self.tokenizer_path,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                seed=seed,
+                extra_payload=extra_payload,
+            )
+        # Keeps simple fake clients and third-party client adapters compatible
+        # with the existing Qwen3.5 OpenAI-compatible wire convention.
+        payload = dict(extra_payload or {})
+        template_kwargs = dict(payload.get("chat_template_kwargs") or {})
+        template_kwargs["enable_thinking"] = False
+        payload["chat_template_kwargs"] = template_kwargs
+        return self.client.chat(
+            messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            seed=seed,
+            extra_payload=payload,
+        )
 
     def answer(self, sample: EvaluationSample, question: str) -> str:
         choice_to_reply = {
@@ -159,7 +319,7 @@ Rules:
             known_info=known_info,
             question=question,
         )
-        response = self.client.chat(
+        response = self.chat_without_thinking(
             [{"role": "user", "content": prompt}],
             temperature=0.0,
             max_tokens=16,
