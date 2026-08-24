@@ -88,7 +88,7 @@ Agent clarification question:
 {question}
 
 The user does NOT answer the agent's clarification question. Instead, write a
-single short natural-language rephrasing of the initial user question only.
+natural-language rephrasing of the initial user question only.
 Do not answer the clarification, do not add any facts, do not ask a new
 question, and do not mention these instructions. Output only the user reply.
 """
@@ -104,9 +104,18 @@ Agent clarification question:
 The user knows this fact, which directly answers the clarification:
 {known_fact}
 
-Reply to the agent with one short, natural-language sentence. Preserve the
+Reply to the agent with one short, natural-language phrase. Preserve the
 material information in the known fact, but compress its wording. Do not add
 facts, explanations, or a second sentence. Output only the user reply.
+For example:
+1.
+question: 你是用什么登陆的？
+known fact: 使用的是域账号登陆的
+compressed reply: 域账号
+2.
+question: 你是用的什么手机呢？
+known fact: 使用的是苹果手机
+compressed reply: 苹果
 """
 
     PROACTIVE_KNOWN_INFO_PROMPT = """You are simulating a user in a support conversation.
