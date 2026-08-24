@@ -430,7 +430,7 @@ def build_components(args: argparse.Namespace) -> tuple[EvaluationRunner, list[t
         args.simulator_timeout,
         args.simulator_max_retries,
     )
-    health_clients = [("policy", policy_client), ("user simulator", simulator_client)]
+    health_clients = [("policy", policy_client)]
     success_judge_client = _client(
         args.success_judge_base_url,
         args.success_judge_model,
@@ -716,10 +716,34 @@ def preflight(
     samples: list[EvaluationSample],
     health_clients: list[tuple[str, OpenAIChatClient]],
     retriever: Any,
+    user_simulator: Any,
 ) -> None:
+    if not samples:
+        raise ValueError("Preflight requires at least one evaluation sample")
+    try:
+        user_simulator.probe(samples[0])
+    except Exception as error:
+        raise RuntimeError(
+            f"Preflight failed for user simulator inference probe: {type(error).__name__}: {error}"
+        ) from error
+    print("[preflight] user simulator: OK (one inference probe; /models not required)")
+
+    simulator_client = getattr(user_simulator, "health_client", None)
+    simulator_identity = (
+        (simulator_client.base_url, simulator_client.model, simulator_client.api_key)
+        if isinstance(simulator_client, OpenAIChatClient)
+        else None
+    )
     checked: set[tuple[str, str, str]] = set()
     for name, client in health_clients:
         identity = (client.base_url, client.model, client.api_key)
+        if identity == simulator_identity:
+            print(
+                f"[preflight] {name}: shared user-simulator endpoint already checked by inference probe "
+                f"({client.model}; /models skipped)"
+            )
+            checked.add(identity)
+            continue
         if identity in checked:
             print(f"[preflight] {name}: shared endpoint already checked ({client.model})")
             continue
@@ -893,7 +917,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"Loaded {len(samples)} samples from {args.test_root}")
     runner, health_clients, retriever = build_components(args)
     if not args.skip_preflight:
-        preflight(samples, health_clients, retriever)
+        preflight(samples, health_clients, retriever, runner.user_simulator)
     if args.check_only:
         print("Preflight checks passed; no evaluation was run.")
         return 0

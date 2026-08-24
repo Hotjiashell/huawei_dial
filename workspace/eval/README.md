@@ -72,8 +72,11 @@ workspace/eval/run_evaluation.sh \
 
 ## 运行
 
-先做连通性检查。该命令会检查各模型的 `/models`，并用测试集第一条问题执行一次
-真实检索探针，但不会生成评估产物：
+先做连通性检查。用户模拟器不会访问 `/models`：程序会对它发起一次真实的、不会写入评测
+轨迹的澄清请求，验证当前 `--model-mode`、无 thinking 配置和返回协议都可用。策略模型、
+独立 Success Judge 和可选轨迹 Judge 仍会检查 `/models`；若其中任一服务与用户模拟器完全复用
+同一个 endpoint/model/key，则也会跳过 `/models`，以该次用户模拟器推理探针作为连通性检查。
+此外，程序会用测试集第一条问题执行一次真实检索探针。以上检查都不会生成评估产物：
 
 ```bash
 workspace/eval/run_evaluation.sh --check-only
@@ -184,8 +187,9 @@ Success/Recall。早于 schema 2.4 的 LLM Success Judge 成功记录还缺少 J
 
 策略请求默认关闭 Qwen thinking，并发送标准 OpenAI tools、`tool_choice=auto` 和
 `parallel_tool_calls=false`。程序同时兼容标准 `message.tool_calls` 与正文中的 Hermes
-`<tool_call>` 格式。若服务不支持 `/models`，可在确认其他组件可用后添加
-`--skip-preflight`；这不会跳过实际评估中的错误检测。
+`<tool_call>` 格式。用户模拟器不要求支持 `/models`。若策略模型、独立 Success Judge 或独立轨迹
+Judge 也不支持 `/models`，可在确认其他组件可用后添加 `--skip-preflight`；这不会跳过实际评估
+中的错误检测。
 
 ## 测试
 

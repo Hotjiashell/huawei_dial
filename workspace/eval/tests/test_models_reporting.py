@@ -12,6 +12,7 @@ from pathlib import Path
 import _bootstrap  # noqa: F401
 
 from clarq_eval.metrics import summarize_results
+from clarq_eval.clients import OpenAIChatClient
 from clarq_eval.models import EvaluationSample, load_case_documents, load_case_titles, load_samples
 from clarq_eval.reporting import append_jsonl, read_jsonl, render_markdown, write_json, write_report
 from evaluate import (
@@ -87,6 +88,27 @@ class FakeHealthClient:
     def health_check(self) -> dict:
         self.calls += 1
         return {"data": []}
+
+
+class FakeOpenAIHealthClient(OpenAIChatClient):
+    def __init__(self, base_url: str = "http://service/v1", model: str = "model"):
+        super().__init__(base_url, model, "key")
+        self.calls = 0
+
+    def health_check(self) -> dict:
+        self.calls += 1
+        return {"data": []}
+
+
+class FakeUserSimulatorProbe:
+    def __init__(self, reply: str = "I don't know.", health_client: OpenAIChatClient | None = None):
+        self.reply = reply
+        self.health_client = health_client
+        self.calls: list[EvaluationSample] = []
+
+    def probe(self, sample: EvaluationSample) -> str:
+        self.calls.append(sample)
+        return self.reply
 
 
 class ModelAndReportingTests(unittest.TestCase):
@@ -504,17 +526,51 @@ class ModelAndReportingTests(unittest.TestCase):
                 json.loads((Path(directory) / "judge_success.json").read_text(encoding="utf-8")), []
             )
 
-    def test_preflight_deduplicates_shared_model_and_rejects_empty_index(self) -> None:
+    def test_preflight_uses_one_user_simulator_inference_probe_and_rejects_empty_index(self) -> None:
         sample = EvaluationSample("one", "money", "target", "question", "intent", (), "Target title")
         client = FakeHealthClient()
+        simulator = FakeUserSimulatorProbe()
 
         class EmptyRetriever:
             def search(self, query: str, max_results: int) -> list:
                 return []
 
         with redirect_stdout(io.StringIO()), self.assertRaisesRegex(RuntimeError, "zero cases"):
-            preflight([sample], [("simulator", client), ("judge", client)], EmptyRetriever())
+            preflight([sample], [("policy", client), ("judge", client)], EmptyRetriever(), simulator)
         self.assertEqual(client.calls, 1)
+        self.assertEqual(simulator.calls, [sample])
+
+    def test_preflight_reports_user_simulator_probe_failures(self) -> None:
+        sample = EvaluationSample("one", "money", "target", "question", "intent", (), "Target title")
+
+        class FailingUserSimulator:
+            def probe(self, probe_sample: EvaluationSample) -> str:
+                raise TimeoutError("simulator timeout")
+
+        with redirect_stdout(io.StringIO()), self.assertRaisesRegex(RuntimeError, "inference probe"):
+            preflight([sample], [], object(), FailingUserSimulator())
+
+    def test_preflight_skips_models_check_for_services_shared_with_user_simulator(self) -> None:
+        sample = EvaluationSample("one", "money", "target", "question", "intent", (), "Target title")
+        shared_client = FakeOpenAIHealthClient()
+        policy_client = FakeOpenAIHealthClient("http://policy/v1", "policy")
+        simulator = FakeUserSimulatorProbe(health_client=shared_client)
+
+        class NonemptyRetriever:
+            def search(self, query: str, max_results: int) -> list:
+                return [{"case_id": "case-1"}]
+
+        with redirect_stdout(io.StringIO()):
+            preflight(
+                [sample],
+                [("policy", policy_client), ("success judge", shared_client)],
+                NonemptyRetriever(),
+                simulator,
+            )
+
+        self.assertEqual(simulator.calls, [sample])
+        self.assertEqual(policy_client.calls, 1)
+        self.assertEqual(shared_client.calls, 0)
 
 
 if __name__ == "__main__":

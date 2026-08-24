@@ -197,6 +197,15 @@ Known facts:
             behavior="unknown",
         )
 
+    @property
+    def health_client(self) -> OpenAIChatClient:
+        """Expose the shared client so preflight can avoid its /models endpoint."""
+        return self._grounded_selector.health_client
+
+    def probe(self, sample: EvaluationSample) -> str:
+        """Use the deterministic selector to make exactly one inference probe."""
+        return self._grounded_selector.probe(sample)
+
     def _rephrase_question(self, sample: EvaluationSample, question: str) -> str:
         prompt = self.REPHRASE_QUESTION_PROMPT.format(
             initial_question=sample.initial_question,

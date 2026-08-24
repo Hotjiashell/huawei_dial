@@ -11,6 +11,7 @@ from .parsing import PolicyProtocolError, parse_json_object
 
 UNKNOWN_CLARIFICATION_RESPONSE = "I don't know."
 INVALID_CLARIFICATION_RESPONSE = "This is not a reasonable clarification question. I refuse to answer."
+USER_SIMULATOR_PROBE_QUESTION = "What device model are you using?"
 
 
 class ChatAPIError(RuntimeError):
@@ -305,6 +306,15 @@ Rules:
             seed=seed,
             extra_payload=payload,
         )
+
+    @property
+    def health_client(self) -> OpenAIChatClient:
+        """Underlying endpoint identity used to avoid a redundant /models probe."""
+        return self.client
+
+    def probe(self, sample: EvaluationSample) -> str:
+        """Make one real no-thinking inference request without affecting a trajectory."""
+        return self.answer(sample, USER_SIMULATOR_PROBE_QUESTION)
 
     def answer(self, sample: EvaluationSample, question: str) -> str:
         choice_to_reply = {
