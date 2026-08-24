@@ -17,16 +17,16 @@
 [`build_test_set.py`](build_test_set.py) 从 `explore/diveUserData/dialog.json` 抽取一条条评测样本。
 输入支持 JSON 数组、正常 JSONL，以及历史导出中出现的多个 JSON 对象直接拼接（`}{`）的格式。
 
-只有 `chat_content` 中实际出现下列完整结构时才可能入选：
+每一条原始记录都会完整提交给 LLM。是否存在、以及如何抽取下列结构，全部由 LLM 判断：
 
 ```text
 用户初始问题 → 客服澄清反问 → 紧接的用户真实回复
 ```
 
-具体而言，聊天记录中必须有用户的开场发言（允许此前有一条客服欢迎语）；客服问题后必须紧接一段
-用户发言。初始问题取自 `chat_content` 的开场连续用户发言，绝不由 `context` 元数据补造；
-`context` / `core_intent` 只作为来源审计信息保留。用户“我不知道”或“只重申需求”的真实回复也会
-保留，因为它们正是不回复率要测量的对象。
+脚本不再解析角色、检查问号、要求开场用户发言，也不自行检查“客服提问后是否紧接用户回答”。它将
+完整的 `chat_content`、`context`、`core_intent` 和已有 `known_info` 发送给模型，由模型决定是否合格、
+选择哪组澄清问答，并输出 `initial_question`、`clarification_question` 和 `human_response`。用户
+“我不知道”或“只重申需求”的真实回复也会保留，因为它们正是不回复率要测量的对象。
 
 抽取默认会调用 LLM 做二次质检：确认客服问题确为澄清反问，并仅从原始对话和用户已有事实中
 补齐支持真实回复所需的 `known_info`。所有新提示词均为中文，请求固定携带：
@@ -47,17 +47,6 @@ python3 workspace/UserSimulatorEval/build_test_set.py \
   --report workspace/UserSimulatorEval/data/user_simulator_test_set.report.json
 ```
 
-首次仅想检查结构候选、暂不请求模型时，可显式使用：
-
-```bash
-python3 workspace/UserSimulatorEval/build_test_set.py \
-  --skip-llm-review \
-  --output workspace/UserSimulatorEval/data/user_simulator_test_set.jsonl
-```
-
-这种结构模式不会验证“是否真是澄清反问”，也不会补充缺失的 `known_info`，只能用于本地检查，
-不应作为正式评测集。
-
 输出的每一行都是一个 JSON 样本，主要字段为：
 
 ```json
@@ -69,11 +58,11 @@ python3 workspace/UserSimulatorEval/build_test_set.py \
   "added_known_info": [],
   "clarification_question": "请问你在哪个工作区",
   "human_response": "红区",
-  "evidence_turns": []
+  "source_chat_content": "用户：连不上网\\n客服：请问你在哪个工作区\\n用户：红区"
 }
 ```
 
-`evidence_turns`、`source` 和 `extraction.review_reason` 用于审计每条数据的来源和事实补齐理由。
+`source_chat_content`、`source` 和 `extraction.review_reason` 用于审计每条数据的来源和事实补齐理由。
 
 ### 2. 评测真实用户与模拟器
 

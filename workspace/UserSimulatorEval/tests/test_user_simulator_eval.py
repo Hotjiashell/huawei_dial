@@ -11,14 +11,14 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from build_test_set import candidate_interactions, make_test_record  # noqa: E402
+from build_test_set import dialogue_inputs, make_test_record, normalise_review  # noqa: E402
 from evaluate_user_simulator import aggregate, normalise_metric_judgement  # noqa: E402
 from user_simulator_eval_common import OpenAIChatClient, load_json_records  # noqa: E402
 
 
 class UserSimulatorEvalTests(unittest.TestCase):
-    def test_concatenated_json_objects_and_complete_flow_filter(self) -> None:
-        """The actual source export can contain ``}{`` without newlines."""
+    def test_concatenated_json_objects_are_all_sent_to_the_llm(self) -> None:
+        """The extractor must not structurally pre-filter incomplete chats."""
 
         raw = (
             '{"call_sno":1,"chat_content":"用户：无法登录\\n客服：请问您使用什么设备？\\n用户：Windows 电脑",'
@@ -31,33 +31,49 @@ class UserSimulatorEvalTests(unittest.TestCase):
             records = load_json_records(source)
 
         self.assertEqual(2, len(records))
-        candidates = candidate_interactions(records)
-        self.assertEqual(1, len(candidates))
-        candidate = candidates[0]
-        self.assertEqual("无法登录", candidate["initial_question"])
-        self.assertEqual("请问您使用什么设备？", candidate["clarification_question"])
-        self.assertEqual("Windows 电脑", candidate["human_response"])
+        dialogues = dialogue_inputs(records)
+        self.assertEqual(2, len(dialogues))
+        self.assertEqual("用户：无法登录\n客服：请问您使用什么设备？\n用户：Windows 电脑", dialogues[0]["raw_chat_content"])
+        # This source has no clarification interaction.  It is still passed
+        # through, and only the LLM may mark it ineligible.
+        self.assertEqual("用户：还有问题", dialogues[1]["raw_chat_content"])
 
     def test_test_record_keeps_original_and_added_known_info_separate(self) -> None:
-        candidate = {
+        dialogue = {
             "sample_id": "dialog-1-q1",
             "source": {},
-            "initial_question": "无法登录",
             "existing_known_info": ["无法登录", "无法登录"],
-            "clarification_question": "使用什么设备？",
-            "human_response": "Windows 电脑",
-            "evidence_turns": [],
+            "raw_chat_content": "用户：无法登录\n客服：使用什么设备？\n用户：Windows 电脑",
         }
         record = make_test_record(
-            candidate,
+            dialogue,
             {
                 "added_known_info": ["用户使用 Windows 电脑", "无法登录"],
                 "reason": "用户明确说使用 Windows 电脑",
+                "initial_question": "无法登录",
+                "clarification_question": "使用什么设备？",
+                "human_response": "Windows 电脑",
             },
         )
         self.assertEqual(["无法登录"], record["original_known_info"])
         self.assertEqual(["用户使用 Windows 电脑"], record["added_known_info"])
         self.assertEqual(["无法登录", "用户使用 Windows 电脑"], record["known_info"])
+        self.assertEqual("Windows 电脑", record["human_response"])
+        self.assertIn("客服：使用什么设备？", record["source_chat_content"])
+
+    def test_eligible_review_requires_only_protocol_fields(self) -> None:
+        review = normalise_review(
+            {
+                "eligible": True,
+                "reason": "模型判断该对话完整",
+                "added_known_info": [],
+                "initial_question": "无法登录",
+                "clarification_question": "使用什么设备？",
+                "human_response": "Windows 电脑",
+            }
+        )
+        self.assertTrue(review["eligible"])
+        self.assertEqual("无法登录", review["initial_question"])
 
     def test_metric_normalisation_and_aggregation(self) -> None:
         first = normalise_metric_judgement(
