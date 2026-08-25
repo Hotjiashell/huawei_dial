@@ -34,24 +34,17 @@ DEFAULT_OUTPUT = Path(__file__).with_name("outputs") / "human_user_behavior.json
 BEHAVIOR_JUDGE_SYSTEM_PROMPT = """你是严格、可复核的客服对话行为分析专家。请评估一条测试集中的真实用户回复，并判断下面四种行为是否出现。
 
 判定规则：
-1. phrase_reply：用户是否主要使用短语、词组或非常简短的片段来回答，而不是完整的自然句子。仅有很短但完整的句子时，结合语法判断；“不知道”“不清楚”“是/否”等也可以是短语。不要按字符数机械判断。
-2. volunteered_unasked_information：用户是否在这次回复中主动提供了客服本次澄清问题没有明确、准确索取的信息。只看用户这次回复中实际出现的信息；客服明确问到的信息不算主动提供。只要至少有一条未被明确追问的信息，就为 true。
+1. phrase_reply：用户是否主要使用短语、词组或非常简短的片段来回答，而不是完整的自然句子。
+2. volunteered_unasked_information：用户是否在这次回复中主动提供了客服本次澄清问题没有明确、准确索取的信息。只看用户这次回复中实际出现的信息；客服明确问到的信息不算主动提供。
 3. nonresponsive_repeats_request：用户是否没有正面回应客服的澄清问题，而只是重复、改述或强调自己的初始需求。用户说“不知道”“不清楚”、只回答一部分、回答是/否、纠正客服前提，都算回应客服，不属于该项；必须是明显完全无视这次追问并重申需求才为 true。
-4. changed_previous_confirmation：结合完整原始对话，用户是否先明确确认/陈述了某个事实，后来又明确修改、否定或更正了同一个事实。只有前后矛盾且确实是用户自己的信息才算；客服的纠正、建议或用户补充新事实不算。若完整对话没有先前确认，必须为 false。
+4. changed_previous_confirmation：结合完整原始对话，用户是否先明确确认/陈述了某个事实，后来又明确修改、否定或更正了同一个事实。只有前后矛盾且确实是用户自己的信息才算。
 
-请严格依据输入文字，不要猜测用户没有说过的事实。`known_info` 仅作背景；信息点必须出现在用户回复或完整对话中。每个布尔值都必须给出简短、可核对的理由。只能输出一个合法 JSON 对象，不要 Markdown、代码围栏或额外文字。格式必须严格为：
+请严格依据输入文字，不要猜测用户没有说过的事实。`known_info` 仅作背景；信息点必须出现在用户回复或完整对话中。只能输出一个合法 JSON 对象，不要 Markdown、代码围栏或额外文字。格式必须严格为：
 {
-  "phrase_reply": false,
-  "volunteered_unasked_information": false,
-  "nonresponsive_repeats_request": false,
-  "changed_previous_confirmation": false,
-  "reason": "对四项判断的总体简短理由",
-  "evidence": {
-    "phrase_reply": "证据或不适用说明",
-    "volunteered_unasked_information": "证据或不适用说明",
-    "nonresponsive_repeats_request": "证据或不适用说明",
-    "changed_previous_confirmation": "证据或不适用说明"
-  }
+  "phrase_reply": false/true,
+  "volunteered_unasked_information": false/true,
+  "nonresponsive_repeats_request": false/true,
+  "changed_previous_confirmation": false/true
 }"""
 
 
@@ -121,22 +114,10 @@ def reply_length_stats(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     }
 
 
-def _normalise_evidence(value: Any) -> dict[str, str]:
-    if not isinstance(value, Mapping):
-        return {field: "" for field in BEHAVIOR_FIELDS}
-    return {field: str(value.get(field) or "").strip() for field in BEHAVIOR_FIELDS}
-
-
 def normalise_behavior_judgement(value: Mapping[str, Any]) -> dict[str, Any]:
-    """Keep the four boolean labels and auditable text from Judge output."""
+    """Keep only the four boolean labels from Judge output."""
 
-    return {
-        field: _as_bool(value.get(field))
-        for field in BEHAVIOR_FIELDS
-    } | {
-        "reason": str(value.get("reason") or "").strip(),
-        "evidence": _normalise_evidence(value.get("evidence")),
-    }
+    return {field: _as_bool(value.get(field)) for field in BEHAVIOR_FIELDS}
 
 
 def build_judge_input(record: Mapping[str, Any]) -> dict[str, Any]:

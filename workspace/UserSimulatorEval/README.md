@@ -121,7 +121,7 @@ python3 workspace/UserSimulatorEval/evaluate_human_user_behavior.py \
 4. 是否在完整对话中修改了自己之前确认的信息。
 
 结果中的 `behavior_metrics` 给出四项的数量和比例，分母是成功完成 Judge 判断的 case 数；`cases`
-保留每个 case 的四个布尔值、理由和证据，`errors` 保存失败的 case。完整的
+保留每个 case 的四个布尔值，`errors` 保存失败的 case。完整的
 `source_chat_content` 会传给 Judge，以便判断第四项前后信息是否发生变化。请求默认携带
 `chat_template_kwargs.enable_thinking=false`。
 

@@ -45,8 +45,6 @@ class UserSimulatorEvalTests(unittest.TestCase):
                 "volunteered_unasked_information": False,
                 "nonresponsive_repeats_request": False,
                 "changed_previous_confirmation": True,
-                "reason": "短语且前后信息冲突",
-                "evidence": {"phrase_reply": "设备名", "changed_previous_confirmation": "前后矛盾"},
             }
         )
         second = normalise_behavior_judgement(
