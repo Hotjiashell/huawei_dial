@@ -307,7 +307,11 @@ def aggregate(scores: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     """Calculate every metric from normalised per-reply annotations locally."""
 
     total = len(scores)
-    information_points = sum(int(score.get("information_point_count", 0)) for score in scores)
+    # Information efficiency describes how much information a user provides
+    # when they actually answer the clarification. A reply classified as
+    # ``non_response`` contributes neither points nor denominator here.
+    answered_scores = [score for score in scores if not score.get("non_response")]
+    information_points = sum(int(score.get("information_point_count", 0)) for score in answered_scores)
     leakage_count = sum(1 for score in scores if score.get("has_unasked_information"))
     non_response_count = sum(1 for score in scores if score.get("non_response"))
     length_scores = [score for score in scores if not score.get("exclude_from_average_reply_length")]
@@ -324,8 +328,12 @@ def aggregate(scores: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     )
     return {
         "evaluated_reply_count": total,
+        "information_efficiency_answered_reply_count": len(answered_scores),
+        "information_efficiency_total_information_point_count": information_points,
         "total_information_point_count": information_points,
-        "information_efficiency_average_points_per_reply": information_points / total if total else 0.0,
+        "information_efficiency_average_points_per_reply": (
+            information_points / len(answered_scores) if answered_scores else 0.0
+        ),
         "answers_with_unasked_information_count": leakage_count,
         "information_leakage_rate": leakage_count / total if total else 0.0,
         "reply_length_included_reply_count": len(length_scores),

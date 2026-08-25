@@ -86,6 +86,17 @@ python3 workspace/UserSimulatorEval/trim_human_responses.py \
 
 `--in-place` 使用临时文件原子替换输入文件；也可以用 `--overwrite` 覆盖指定的已有输出文件。
 
+如果已经有旧版评测输出、只想按当前指标定义重新统计而不重新调用模型，可以使用：
+
+```bash
+python3 workspace/UserSimulatorEval/aggregate_user_simulator_output.py \
+  workspace/UserSimulatorEval/outputs/compare.json \
+  --output workspace/UserSimulatorEval/outputs/compare.reaggregated.json
+```
+
+该脚本读取原输出 `records` 中已经保存的 Judge 结果；信息提供效率只使用
+`non_response=false` 的回复，其他指标沿用原有统计口径。
+
 [`evaluate_user_simulator.py`](evaluate_user_simulator.py) 使用同一个中文 LLM Judge 对回复标注信息点、
 是否未经追问而泄漏信息、以及是否完全无视追问。四项本地汇总指标的正式定义见
 [`metric.md`](metric.md)。
@@ -131,6 +142,16 @@ prompt。可用 `--simulator-adapter clarq_grounded` 测训练兼容的基础模
 请求仍默认关闭思考。输出会保留每条生成回复、模拟器行为元数据、Judge 原始 JSON、信息点、未被追问
 的信息点、长度和不回复判断，并在 `metrics` 中给出真实用户、模拟器及四项主要指标的差值。不会将它们
 擅自合成为单一类人分数。
+
+其中，信息提供效率只统计 Judge 判定为回应了客服澄清问题的回复（`non_response=false`）。
+被判定为不回复的样本仍参与不回复率、泄漏率等其他指标，但不进入信息提供效率的分子和分母。
+如果已有旧版评测结果，需要按当前口径重算，可运行：
+
+```bash
+python3 workspace/UserSimulatorEval/aggregate_user_simulator_output.py \
+  workspace/UserSimulatorEval/outputs/compare.json \
+  --output workspace/UserSimulatorEval/outputs/compare.reaggregated.json
+```
 
 `clarification_eval.py` 使用一个可配置的 LLM Judge，从客服对话中识别：
 

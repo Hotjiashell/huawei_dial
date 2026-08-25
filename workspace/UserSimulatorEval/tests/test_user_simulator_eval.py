@@ -12,6 +12,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from build_test_set import dialogue_inputs, make_test_record, normalise_review  # noqa: E402
+from aggregate_user_simulator_output import reaggregate  # noqa: E402
 from evaluate_user_simulator import aggregate, normalise_metric_judgement  # noqa: E402
 from trim_human_responses import first_line, trim_records  # noqa: E402
 from user_simulator_eval_common import OpenAIChatClient, load_json_records  # noqa: E402
@@ -120,7 +121,7 @@ class UserSimulatorEvalTests(unittest.TestCase):
         third["reply_length_exclusion_reason"] = "programmatic_unknown_response"
         summary = aggregate([first, second, third])
         self.assertEqual(3, summary["evaluated_reply_count"])
-        self.assertEqual(2 / 3, summary["information_efficiency_average_points_per_reply"])
+        self.assertEqual(1.0, summary["information_efficiency_average_points_per_reply"])
         self.assertEqual(1 / 3, summary["information_leakage_rate"])
         self.assertEqual(1, summary["reply_length_included_reply_count"])
         self.assertEqual(1, summary["programmatic_invalid_clarification_reply_excluded_from_length_count"])
@@ -128,6 +129,47 @@ class UserSimulatorEvalTests(unittest.TestCase):
         self.assertEqual(2, summary["programmatic_reply_excluded_from_length_count"])
         self.assertEqual(10.0, summary["average_reply_length_characters"])
         self.assertEqual(1 / 3, summary["non_response_rate"])
+
+    def test_reaggregate_existing_output_uses_answered_replies_for_efficiency(self) -> None:
+        report = {
+            "records": [
+                {
+                    "real_user": {
+                        "non_response": False,
+                        "information_point_count": 2,
+                        "has_unasked_information": False,
+                        "reply_length_characters": 4,
+                    },
+                    "simulator": {
+                        "evaluation": {
+                            "non_response": True,
+                            "information_point_count": 9,
+                            "has_unasked_information": False,
+                            "reply_length_characters": 30,
+                        }
+                    },
+                },
+                {
+                    "real_user": {
+                        "non_response": True,
+                        "information_point_count": 8,
+                        "has_unasked_information": False,
+                        "reply_length_characters": 20,
+                    },
+                    "simulator": {
+                        "evaluation": {
+                            "non_response": False,
+                            "information_point_count": 1,
+                            "has_unasked_information": False,
+                            "reply_length_characters": 3,
+                        }
+                    },
+                },
+            ]
+        }
+        metrics = reaggregate(report)
+        self.assertEqual(2.0, metrics["real_user"]["information_efficiency_average_points_per_reply"])
+        self.assertEqual(1.0, metrics["simulator"]["information_efficiency_average_points_per_reply"])
 
     def test_chat_request_disables_thinking_and_falls_back_json_mode(self) -> None:
         client = OpenAIChatClient("http://example.test/v1", "fake-model", max_retries=0)
