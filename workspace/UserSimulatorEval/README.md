@@ -97,6 +97,34 @@ python3 workspace/UserSimulatorEval/aggregate_user_simulator_output.py \
 该脚本读取原输出 `records` 中已经保存的 Judge 结果；信息提供效率只使用
 `non_response=false` 的回复，其他指标沿用原有统计口径。
 
+### 3. 统计真实用户的回复长度与四类行为
+
+如果要直接分析测试集中的真实用户 `human_response`，可以运行
+[`evaluate_human_user_behavior.py`](evaluate_human_user_behavior.py)：
+
+```bash
+python3 workspace/UserSimulatorEval/evaluate_human_user_behavior.py \
+  workspace/UserSimulatorEval/data/user_simulator_test_set.jsonl \
+  --url "$USER_SIMULATOR_EVAL_JUDGE_URL" \
+  --model "$USER_SIMULATOR_EVAL_JUDGE_MODEL" \
+  --output workspace/UserSimulatorEval/outputs/human_user_behavior.json
+```
+
+该脚本的回复长度完全本地计算，不调用 LLM：`human_response` 每个非空换行片段算一句回复，先计算
+每句去除空白后的字符数，再统计所有句子的平均长度。报告同时保存每个 case 的句子拆分和长度。
+
+每个 case 额外调用一次中文 Judge，判断：
+
+1. 是否使用短语/词组回复；
+2. 是否主动提供了客服本次没有明确追问的信息；
+3. 是否没有正面回应客服、只是重复或改述初始需求；
+4. 是否在完整对话中修改了自己之前确认的信息。
+
+结果中的 `behavior_metrics` 给出四项的数量和比例，分母是成功完成 Judge 判断的 case 数；`cases`
+保留每个 case 的四个布尔值、理由和证据，`errors` 保存失败的 case。完整的
+`source_chat_content` 会传给 Judge，以便判断第四项前后信息是否发生变化。请求默认携带
+`chat_template_kwargs.enable_thinking=false`。
+
 [`evaluate_user_simulator.py`](evaluate_user_simulator.py) 使用同一个中文 LLM Judge 对回复标注信息点、
 是否未经追问而泄漏信息、以及是否完全无视追问。四项本地汇总指标的正式定义见
 [`metric.md`](metric.md)。

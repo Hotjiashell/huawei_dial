@@ -14,11 +14,56 @@ if str(ROOT) not in sys.path:
 from build_test_set import dialogue_inputs, make_test_record, normalise_review  # noqa: E402
 from aggregate_user_simulator_output import reaggregate  # noqa: E402
 from evaluate_user_simulator import aggregate, normalise_metric_judgement  # noqa: E402
+from evaluate_human_user_behavior import (  # noqa: E402
+    aggregate_behavior_judgements,
+    normalise_behavior_judgement,
+    reply_length_stats,
+)
 from trim_human_responses import first_line, trim_records  # noqa: E402
 from user_simulator_eval_common import OpenAIChatClient, load_json_records  # noqa: E402
 
 
 class UserSimulatorEvalTests(unittest.TestCase):
+    def test_human_behavior_reply_length_uses_newline_delimited_units(self) -> None:
+        stats = reply_length_stats(
+            [
+                {"sample_id": "a", "human_response": "abc\n12"},
+                {"sample_id": "b", "human_response": "中文 回复"},
+            ]
+        )
+        self.assertEqual(3, stats["reply_line_count"])
+        self.assertEqual(9, stats["total_reply_length_characters"])
+        # abc=3, 12=2, 中文回复=4; (3+2+4)/3.
+        self.assertEqual(3.0, stats["average_reply_length_characters_per_line"])
+        self.assertEqual(3.25, stats["average_of_case_average_reply_lengths"])
+        self.assertEqual([3, 2], stats["per_case"][0]["reply_line_lengths"])
+
+    def test_behavior_judgement_normalisation_and_rates(self) -> None:
+        first = normalise_behavior_judgement(
+            {
+                "phrase_reply": True,
+                "volunteered_unasked_information": False,
+                "nonresponsive_repeats_request": False,
+                "changed_previous_confirmation": True,
+                "reason": "短语且前后信息冲突",
+                "evidence": {"phrase_reply": "设备名", "changed_previous_confirmation": "前后矛盾"},
+            }
+        )
+        second = normalise_behavior_judgement(
+            {
+                "phrase_reply": False,
+                "volunteered_unasked_information": True,
+                "nonresponsive_repeats_request": True,
+                "changed_previous_confirmation": False,
+            }
+        )
+        metrics = aggregate_behavior_judgements([first, second])
+        self.assertEqual(2, metrics["judged_case_count"])
+        self.assertEqual(0.5, metrics["phrase_reply_rate"])
+        self.assertEqual(0.5, metrics["volunteered_unasked_information_rate"])
+        self.assertEqual(0.5, metrics["nonresponsive_repeats_request_rate"])
+        self.assertEqual(0.5, metrics["changed_previous_confirmation_rate"])
+
     def test_trim_human_response_at_first_newline(self) -> None:
         self.assertEqual("第一句", first_line("第一句\n第二句"))
         self.assertEqual("第一句", first_line("第一句\r\n第二句"))
