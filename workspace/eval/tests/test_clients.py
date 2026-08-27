@@ -58,6 +58,80 @@ class FakeTokenizer:
         self.calls.append((messages, kwargs))
         return "<qwen3-rendered-prompt>"
 
+
+class PolicyModelModeTests(unittest.TestCase):
+    def test_qwen3_policy_renders_tools_locally_and_calls_completions(self) -> None:
+        client = RecordingOpenAIChatClient()
+        tokenizer = FakeTokenizer()
+        client._tokenizer_cache["/models/policy-qwen3"] = tokenizer
+        messages = [{"role": "user", "content": "hello"}]
+        tools = [{"type": "function", "function": {"name": "search_case"}}]
+
+        response = client.policy_chat(
+            messages,
+            tools=tools,
+            model_mode="qwen3",
+            tokenizer_path="/models/policy-qwen3",
+            enable_thinking=False,
+            max_tokens=16,
+        )
+
+        self.assertEqual(response_content(response), "KNOWN_INFO_1")
+        self.assertEqual(tokenizer.calls[0][0], messages)
+        self.assertEqual(
+            tokenizer.calls[0][1],
+            {
+                "tokenize": False,
+                "add_generation_prompt": True,
+                "enable_thinking": False,
+                "tools": tools,
+            },
+        )
+        _, url, body = client.requests[0]
+        self.assertTrue(url.endswith("/completions"))
+        self.assertEqual(body["prompt"], "<qwen3-rendered-prompt>")
+        self.assertNotIn("tools", body)
+        self.assertNotIn("tool_choice", body)
+        self.assertNotIn("parallel_tool_calls", body)
+        self.assertNotIn("chat_template_kwargs", body)
+
+    def test_qwen3_policy_passes_enabled_thinking_to_local_template(self) -> None:
+        client = RecordingOpenAIChatClient()
+        tokenizer = FakeTokenizer()
+        client._tokenizer_cache["/models/policy-qwen3"] = tokenizer
+
+        client.policy_chat(
+            [{"role": "user", "content": "hello"}],
+            tools=[{"type": "function", "function": {"name": "search_case"}}],
+            model_mode="qwen3",
+            tokenizer_path="/models/policy-qwen3",
+            enable_thinking=True,
+        )
+
+        self.assertTrue(tokenizer.calls[0][1]["enable_thinking"])
+
+    def test_qwen3_5_policy_uses_chat_completions_with_tools(self) -> None:
+        client = RecordingOpenAIChatClient()
+        messages = [{"role": "user", "content": "hello"}]
+        tools = [{"type": "function", "function": {"name": "search_case"}}]
+
+        client.policy_chat(
+            messages,
+            tools=tools,
+            model_mode="qwen3_5",
+            enable_thinking=False,
+            max_tokens=16,
+        )
+
+        _, url, body = client.requests[0]
+        self.assertTrue(url.endswith("/chat/completions"))
+        self.assertEqual(body["messages"], messages)
+        self.assertEqual(body["tools"], tools)
+        self.assertEqual(body["tool_choice"], "auto")
+        self.assertFalse(body["parallel_tool_calls"])
+        self.assertEqual(body["chat_template_kwargs"], {"enable_thinking": False})
+
+
 class UserSimulatorTests(unittest.TestCase):
     def test_clarification_reply_uses_allowed_selection(self) -> None:
         client = FakeChatClient(content="KNOWN_INFO_1")

@@ -447,12 +447,16 @@ class ModelAndReportingTests(unittest.TestCase):
 
         self.assertEqual(args.user_simulator_mode, "random")
         self.assertEqual(args.model_mode, "qwen3_5")
+        self.assertEqual(args.policy_model_mode, "qwen3_5")
         self.assertEqual(args.random_user_simulator_seed, 99)
         self.assertTrue(args.random_user_proactive_known_on_unknown)
         simulation = _run_config(args)["services"]["user_simulator"]
         self.assertEqual(simulation["mode"], "random")
         self.assertEqual(simulation["model_mode"], "qwen3_5")
         self.assertIsNone(simulation["tokenizer_path"])
+        policy = _run_config(args)["services"]["policy"]
+        self.assertEqual(policy["model_mode"], "qwen3_5")
+        self.assertIsNone(policy["tokenizer_path"])
         self.assertEqual(
             simulation["random_sampling"],
             {
@@ -473,7 +477,11 @@ class ModelAndReportingTests(unittest.TestCase):
                     "--policy-base-url",
                     "http://policy/v1",
                     "--policy-model",
-                    "policy",
+                    "Qwen/Qwen3-32B",
+                    "--policy-model-mode",
+                    "qwen3",
+                    "--policy-tokenizer-path",
+                    "/models/policy-qwen3-tokenizer",
                     "--simulator-model",
                     "Qwen/Qwen3-32B",
                     "--model-mode",
@@ -486,6 +494,9 @@ class ModelAndReportingTests(unittest.TestCase):
         simulation = _run_config(args)["services"]["user_simulator"]
         self.assertEqual(simulation["model_mode"], "qwen3")
         self.assertEqual(simulation["tokenizer_path"], "/models/qwen3-tokenizer")
+        policy = _run_config(args)["services"]["policy"]
+        self.assertEqual(policy["model_mode"], "qwen3")
+        self.assertEqual(policy["tokenizer_path"], "/models/policy-qwen3-tokenizer")
 
     def test_execution_resume_retries_only_latest_failure(self) -> None:
         samples = [

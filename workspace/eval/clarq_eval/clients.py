@@ -90,6 +90,48 @@ class OpenAIChatClient:
             body.update(extra_payload)
         return self._request("POST", f"{self.base_url}/completions", json_body=body)
 
+    def policy_chat(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        tools: list[dict[str, Any]],
+        model_mode: str = "qwen3_5",
+        tokenizer_path: str | None = None,
+        enable_thinking: bool = False,
+        temperature: float = 0.0,
+        max_tokens: int = 512,
+        seed: int | None = None,
+    ) -> dict[str, Any]:
+        """Call the policy model using the serving protocol for its Qwen family.
+
+        Qwen3.5 serving stacks accept tool definitions and thinking controls on
+        the OpenAI chat-completions endpoint. Qwen3 needs the local tokenizer to
+        render both the chat and tool-use template before calling /completions.
+        """
+        if model_mode == "qwen3_5":
+            return self.chat(
+                messages,
+                tools=tools,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                seed=seed,
+                extra_payload={"chat_template_kwargs": {"enable_thinking": enable_thinking}},
+            )
+        if model_mode == "qwen3":
+            prompt = self._apply_qwen3_chat_template(
+                messages,
+                tokenizer_path,
+                tools=tools,
+                enable_thinking=enable_thinking,
+            )
+            return self.completion(
+                prompt,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                seed=seed,
+            )
+        raise ValueError(f"Unsupported policy model_mode: {model_mode!r}")
+
     def user_simulator_chat(
         self,
         messages: list[dict[str, Any]],
@@ -121,7 +163,11 @@ class OpenAIChatClient:
                 extra_payload=payload,
             )
         if model_mode == "qwen3":
-            prompt = self._apply_qwen3_chat_template(messages, tokenizer_path)
+            prompt = self._apply_qwen3_chat_template(
+                messages,
+                tokenizer_path,
+                enable_thinking=False,
+            )
             payload = dict(extra_payload or {})
             payload.pop("chat_template_kwargs", None)
             return self.completion(
@@ -137,10 +183,13 @@ class OpenAIChatClient:
         self,
         messages: list[dict[str, Any]],
         tokenizer_path: str | None,
+        *,
+        tools: list[dict[str, Any]] | None = None,
+        enable_thinking: bool = False,
     ) -> str:
         source = str(tokenizer_path or self.model).strip()
         if not source:
-            raise ValueError("A tokenizer path or user simulator model is required for model_mode=qwen3")
+            raise ValueError("A tokenizer path or model is required for model_mode=qwen3")
         with self._tokenizer_lock:
             tokenizer = self._tokenizer_cache.get(source)
             if tokenizer is None:
@@ -155,18 +204,20 @@ class OpenAIChatClient:
                 except Exception as error:
                     raise ChatAPIError(
                         f"Unable to load Qwen3 tokenizer from {source!r}; "
-                        "set --simulator-tokenizer-path to a local tokenizer directory"
+                        "configure a local tokenizer directory or Hugging Face identifier"
                     ) from error
                 self._tokenizer_cache[source] = tokenizer
         try:
-            text = tokenizer.apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=True,
-                enable_thinking=False,
-            )
+            template_kwargs: dict[str, Any] = {
+                "tokenize": False,
+                "add_generation_prompt": True,
+                "enable_thinking": enable_thinking,
+            }
+            if tools:
+                template_kwargs["tools"] = tools
+            text = tokenizer.apply_chat_template(messages, **template_kwargs)
         except Exception as error:
-            raise ChatAPIError("Failed to apply the Qwen3 chat template with thinking disabled") from error
+            raise ChatAPIError("Failed to apply the Qwen3 chat template with the configured thinking mode") from error
         if not isinstance(text, str) or not text:
             raise ChatAPIError("Qwen3 tokenizer returned an empty non-text chat template")
         return text

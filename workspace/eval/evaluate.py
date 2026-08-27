@@ -123,6 +123,23 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("--policy-base-url", default=_env("POLICY_BASE_URL"))
     parser.add_argument("--policy-model", default=_env("POLICY_MODEL"))
+    parser.add_argument(
+        "--policy-model-mode",
+        choices=("qwen3", "qwen3_5"),
+        default=_env("POLICY_MODEL_MODE", "qwen3_5"),
+        help=(
+            "Policy model family used to configure thinking and request format: qwen3 applies the tokenizer "
+            "chat template locally; qwen3_5 uses chat_template_kwargs."
+        ),
+    )
+    parser.add_argument(
+        "--policy-tokenizer-path",
+        default=_env("POLICY_TOKENIZER_PATH"),
+        help=(
+            "Local Qwen3 policy tokenizer directory or Hugging Face identifier. Used only when "
+            "--policy-model-mode qwen3; defaults to --policy-model."
+        ),
+    )
     parser.add_argument("--policy-api-key", default=_env("POLICY_API_KEY", "EMPTY"))
     parser.add_argument("--policy-timeout", type=float, default=float(_env("POLICY_TIMEOUT", "120")))
     parser.add_argument("--policy-max-retries", type=int, default=int(_env("POLICY_MAX_RETRIES", "3")))
@@ -486,13 +503,15 @@ def build_components(args: argparse.Namespace) -> tuple[EvaluationRunner, list[t
         max_tokens=args.policy_max_tokens,
         seed=args.seed,
         enable_thinking=args.policy_enable_thinking,
+        policy_model_mode=args.policy_model_mode,
+        policy_tokenizer_path=args.policy_tokenizer_path,
     )
     return runner, health_clients, retriever
 
 
 def _run_config(args: argparse.Namespace) -> dict[str, Any]:
     return {
-        "schema_version": "2.6",
+        "schema_version": "2.7",
         "created_at": datetime.now(timezone.utc).isoformat(),
         "data": {
             "test_root": str(args.test_root),
@@ -524,7 +543,12 @@ def _run_config(args: argparse.Namespace) -> dict[str, Any]:
             "ground_truth_case_source": "case_id resolved from data.case_document",
         },
         "services": {
-            "policy": {"base_url": _redact_url(args.policy_base_url), "model": args.policy_model},
+            "policy": {
+                "base_url": _redact_url(args.policy_base_url),
+                "model": args.policy_model,
+                "model_mode": args.policy_model_mode,
+                "tokenizer_path": args.policy_tokenizer_path,
+            },
             "user_simulator": {
                 "base_url": _redact_url(args.simulator_base_url),
                 "model": args.simulator_model,
@@ -628,7 +652,7 @@ def latest_records(records: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
 
 def _error_record(sample: EvaluationSample, error: Exception, elapsed_seconds: float) -> dict[str, Any]:
     return {
-        "schema_version": "2.6",
+        "schema_version": "2.7",
         "sample_id": sample.sample_id,
         "domain": sample.domain,
         "target_case_id": sample.target_case_id,

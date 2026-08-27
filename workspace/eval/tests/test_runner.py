@@ -37,12 +37,17 @@ class FakePolicy:
     def __init__(self, responses: list[dict]):
         self.responses = list(responses)
         self.message_history: list[list[dict]] = []
+        self.policy_calls: list[dict] = []
 
     def chat(self, messages: list[dict], **kwargs) -> dict:
         self.message_history.append([dict(message) for message in messages])
         if not self.responses:
             raise AssertionError("policy response sequence exhausted")
         return self.responses.pop(0)
+
+    def policy_chat(self, messages: list[dict], **kwargs) -> dict:
+        self.policy_calls.append(dict(kwargs))
+        return self.chat(messages, **kwargs)
 
 
 class FakeRetriever:
@@ -277,6 +282,26 @@ class EvaluationRunnerTests(unittest.TestCase):
         self.assertEqual(event["clarification_type"], "known_info")
         self.assertEqual(event["user_simulator_behavior"], "compressed_known_info")
         self.assertEqual(event["user_simulator_source_known_info"], "Version 2")
+
+    def test_policy_model_mode_and_tokenizer_path_are_forwarded(self) -> None:
+        policy = FakePolicy([complete_response()])
+        runner = EvaluationRunner(
+            policy_client=policy,
+            user_simulator=FakeSimulator({}),
+            retriever=FakeRetriever({"initial question": [case("baseline")]}),
+            success_judge=FakeSuccessJudge(can_answer=False),
+            policy_model_mode="qwen3",
+            policy_tokenizer_path="/models/policy-qwen3",
+            enable_thinking=False,
+            max_turns=1,
+        )
+
+        runner.run(SAMPLE)
+
+        self.assertEqual(policy.policy_calls[0]["model_mode"], "qwen3")
+        self.assertEqual(policy.policy_calls[0]["tokenizer_path"], "/models/policy-qwen3")
+        self.assertFalse(policy.policy_calls[0]["enable_thinking"])
+        self.assertTrue(policy.policy_calls[0]["tools"])
 
     def test_runner_validates_success_top_k(self) -> None:
         with self.assertRaisesRegex(ValueError, "success_top_k"):

@@ -1,7 +1,7 @@
 # ClarQ 部署模型评估
 
 该目录提供从测试集跑对话轨迹、调用训练同款检索器、计算指标到生成报告的完整流程。
-评估对象是已部署为 OpenAI-compatible Chat Completions 服务的训练后策略模型。
+评估对象是已部署为 OpenAI-compatible 服务的训练后策略模型。
 
 ## 流程
 
@@ -68,6 +68,30 @@ workspace/eval/run_evaluation.sh \
   --model-mode qwen3 \
   --simulator-tokenizer-path /models/Qwen3-32B \
   --output-dir workspace/eval/outputs/qwen3-simulator-smoke
+```
+
+### 策略模型模式
+
+`--policy-model-mode` 独立控制策略模型的 thinking 和请求协议，默认是 `qwen3_5`。它不影响
+用户模拟器的 `--model-mode`：
+
+- `qwen3_5`：请求 `/chat/completions`，带标准 OpenAI `tools`、`tool_choice=auto`、
+  `parallel_tool_calls=false`，并传入
+  `chat_template_kwargs: {"enable_thinking": <policy-enable-thinking>}`；
+- `qwen3`：本地 Qwen3 tokenizer 通过
+  `tokenizer.apply_chat_template(messages, tools=TOOLS, enable_thinking=<policy-enable-thinking>)`
+  渲染消息和工具定义后，请求 `/completions`。该模式需要安装 `transformers`，并能从
+  `--policy-tokenizer-path`（若未设置则使用 `--policy-model`）加载 tokenizer。
+
+例如，策略模型和用户模拟器都使用本地 Qwen3 tokenizer：
+
+```bash
+workspace/eval/run_evaluation.sh \
+  --policy-model-mode qwen3 \
+  --policy-tokenizer-path /models/Qwen3-Policy \
+  --model-mode qwen3 \
+  --simulator-tokenizer-path /models/Qwen3-32B \
+  --output-dir workspace/eval/outputs/qwen3-policy-and-simulator-smoke
 ```
 
 ## 运行
@@ -185,11 +209,10 @@ Success/Recall。早于 schema 2.4 的 LLM Success Judge 成功记录还缺少 J
   直接命中的成功不会调用 LLM，因此不在该文件中；
 - `run_config.json`：不含凭据的可复现配置。
 
-策略请求默认关闭 Qwen thinking，并发送标准 OpenAI tools、`tool_choice=auto` 和
-`parallel_tool_calls=false`。程序同时兼容标准 `message.tool_calls` 与正文中的 Hermes
-`<tool_call>` 格式。用户模拟器不要求支持 `/models`。若策略模型、独立 Success Judge 或独立轨迹
-Judge 也不支持 `/models`，可在确认其他组件可用后添加 `--skip-preflight`；这不会跳过实际评估
-中的错误检测。
+策略模型默认关闭 Qwen thinking，具体请求格式由 `--policy-model-mode` 决定。程序同时兼容标准
+`message.tool_calls` 与正文中的 Hermes `<tool_call>` 格式。用户模拟器不要求支持 `/models`。若策略模型、
+独立 Success Judge 或独立轨迹 Judge 也不支持 `/models`，可在确认其他组件可用后添加
+`--skip-preflight`；这不会跳过实际评估中的错误检测。
 
 ## 测试
 

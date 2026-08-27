@@ -155,12 +155,16 @@ class EvaluationRunner:
         max_tokens: int = 512,
         seed: int | None = 42,
         enable_thinking: bool = False,
+        policy_model_mode: str = "qwen3_5",
+        policy_tokenizer_path: str | None = None,
         system_prompt: str = SYSTEM_PROMPT,
     ):
         if max_turns <= 0 or max_searches <= 0 or top_k <= 0 or success_top_k <= 0:
             raise ValueError("max_turns, max_searches, top_k, and success_top_k must be positive")
         if success_top_k > top_k:
             raise ValueError("success_top_k must not exceed top_k")
+        if policy_model_mode not in {"qwen3", "qwen3_5"}:
+            raise ValueError("policy_model_mode must be 'qwen3' or 'qwen3_5'")
         self.policy_client = policy_client
         self.user_simulator = user_simulator
         self.retriever = retriever
@@ -175,6 +179,8 @@ class EvaluationRunner:
         self.max_tokens = max_tokens
         self.seed = seed
         self.enable_thinking = enable_thinking
+        self.policy_model_mode = policy_model_mode
+        self.policy_tokenizer_path = policy_tokenizer_path
         self.system_prompt = system_prompt
 
     def run(self, sample: EvaluationSample) -> dict[str, Any]:
@@ -205,15 +211,15 @@ class EvaluationRunner:
         terminal_text = ""
 
         for turn_number in range(1, self.max_turns + 1):
-            response = self.policy_client.chat(
+            response = self.policy_client.policy_chat(
                 messages,
                 tools=TOOLS,
+                model_mode=self.policy_model_mode,
+                tokenizer_path=self.policy_tokenizer_path,
+                enable_thinking=self.enable_thinking,
                 temperature=self.temperature,
                 max_tokens=self.max_tokens,
                 seed=self.seed,
-                extra_payload={
-                    "chat_template_kwargs": {"enable_thinking": self.enable_thinking},
-                },
             )
             parsed = parse_policy_response(response)
             event: dict[str, Any] = {
@@ -389,7 +395,7 @@ class EvaluationRunner:
             break
 
         result: dict[str, Any] = {
-            "schema_version": "2.6",
+            "schema_version": "2.7",
             "sample_id": sample.sample_id,
             "domain": sample.domain,
             "target_case_id": sample.target_case_id,
