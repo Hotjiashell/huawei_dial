@@ -197,6 +197,25 @@ Success/Recall。早于 schema 2.4 的 LLM Success Judge 成功记录还缺少 J
 标准案例内容，无法按当前协议聚合或重建 `judge_success.json`，需要重新执行评估。更换案例文档后
 也必须使用新的输出目录，或重新完整评估。
 
+### 纯轨迹规则指标
+
+如果只需要从已保存的 `trajectories.jsonl` 计算可复核指标，且不希望依赖或读取任何模型推理、
+Success Judge 或轨迹质量 Judge 结果，请使用独立脚本：
+
+```bash
+python3 workspace/eval/evaluate_trajectory.py \
+  --trajectory-file workspace/eval/outputs/checkpoint-1000/trajectories.jsonl \
+  --k-values 1,3,5 \
+  --success-top-k 3
+```
+
+它只读取轨迹中的 `target_case_title`、`baseline_results`、工具事件、`final_results`、轮数、停止
+原因和耗时字段；不会建立模型、检索或 Judge 客户端，也不会读取 `assistant_content`、
+`success_judgment` 或 `judge`。该脚本将每个 `sample_id` 的最后一条记录作为有效轨迹，在输入文件
+同目录输出 `trajectory_metrics.json` 与 `trajectory_report.md`。其中 Success 固定定义为“目标 title
+位于最终检索 Top-K”，不等同于本目录正式评估中可使用 LLM Success Judge 的 Success Rate。
+如果所有完成轨迹都带有 `runner_config.top_k`，脚本还会拒绝计算超出保存深度的 K 值。
+
 ## 产物
 
 - `trajectories.jsonl`：完整对话、工具调用、检索列表、停止原因、
