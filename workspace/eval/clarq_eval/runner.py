@@ -23,12 +23,12 @@ Use exactly one action at a time:
   which cases are relevant. Ask one concise, discriminative question.
 - Call search_case when the request is specific enough. Build a focused query
   from the original request and confirmed clarifications without assumptions.
-- Output exactly Complete when the latest retrieved cases are sufficient.
+- Call Complete when the latest retrieved cases are sufficient.
 
 Do not answer the user's technical question yourself. Search before completing.
 If retrieved cases differ substantially from the request, clarify one useful
 missing detail or reformulate the query. Do not repeat answered questions.
-You may call search_case at most four times. Output no explanation with Complete.
+You may call search_case at most four times.
 """
 
 
@@ -66,6 +66,18 @@ TOOLS = [
                     }
                 },
                 "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "Complete",
+            "description": "End the case-retrieval interaction when the latest retrieved cases are sufficient.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
             },
         },
     },
@@ -251,6 +263,18 @@ class EvaluationRunner:
             call = parsed.tool_calls[0]
             event["action"] = {"type": call.name, "arguments": call.arguments}
 
+            if call.name == "Complete":
+                if call.arguments:
+                    event["violations"].append("invalid_complete_arguments")
+                    events.append(event)
+                    stop_reason = "invalid_tool_arguments"
+                    break
+                event["action"] = {"type": "complete"}
+                events.append(event)
+                stop_reason = "complete"
+                terminal_text = "Complete"
+                break
+
             # ToolAgentLoop checks max_assistant_turns before parsing or executing
             # tool calls from the final allowed assistant turn.
             if turn_number >= self.max_turns:
@@ -395,7 +419,7 @@ class EvaluationRunner:
             break
 
         result: dict[str, Any] = {
-            "schema_version": "2.7",
+            "schema_version": "2.8",
             "sample_id": sample.sample_id,
             "domain": sample.domain,
             "target_case_id": sample.target_case_id,

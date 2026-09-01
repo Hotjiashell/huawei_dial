@@ -161,6 +161,21 @@ class EvaluationRunnerTests(unittest.TestCase):
         self.assertEqual(search_event["pre_clarification_case_ids"], ["baseline-miss"])
         self.assertEqual(retriever.calls, [("initial question", 5), ("initial question Version 2", 5)])
 
+    def test_complete_tool_call_ends_interaction(self) -> None:
+        runner = EvaluationRunner(
+            policy_client=FakePolicy([tool_response("Complete", {})]),
+            user_simulator=FakeSimulator({}),
+            retriever=FakeRetriever({"initial question": [case("target")]}),
+            success_judge=FakeSuccessJudge(can_answer=False),
+            max_turns=1,
+        )
+
+        result = runner.run(SAMPLE)
+
+        self.assertEqual("complete", result["stop_reason"])
+        self.assertEqual("Complete", result["terminal_text"])
+        self.assertEqual([{"type": "complete"}], [event["action"] for event in result["events"]])
+
     def test_gt_miss_calls_success_judge_with_only_configured_top_k(self) -> None:
         retrieved = [
             case("first", "First"),
