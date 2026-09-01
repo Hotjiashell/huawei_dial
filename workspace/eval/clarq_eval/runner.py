@@ -54,7 +54,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "search_case",
-            "description": "Retrieve the five most relevant cases from the hybrid ClarQ case index.",
+            "description": "Retrieve the five most relevant cases from the configured case-retrieval backend.",
             "parameters": {
                 "type": "object",
                 "properties": {

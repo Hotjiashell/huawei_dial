@@ -17,6 +17,7 @@ from clarq_eval.models import EvaluationSample, load_case_documents, load_case_t
 from clarq_eval.reporting import append_jsonl, read_jsonl, render_markdown, write_json, write_report
 from evaluate import (
     _prepare_output,
+    _load_retriever,
     _run_config,
     aggregate,
     latest_records,
@@ -400,6 +401,47 @@ class ModelAndReportingTests(unittest.TestCase):
             legacy["schema_version"] = "1.0"
             with self.assertRaises(ValueError):
                 _prepare_output(args, legacy)
+
+    def test_new_retrive_backend_loads_module_and_records_configuration(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            module_path = root / "new_retrive.py"
+            module_path.write_text(
+                "def retrieve_case(query, top_k=20, strategy='lexical&semantic', index='document_12', "
+                "use_similar_question=False, use_chat=False, chat_content=''):\n"
+                "    return [{'caseID': 'case-1', 'case_name': query, 'text': index, 'score': top_k}]\n",
+                encoding="utf-8",
+            )
+            args = parse_args(
+                [
+                    "--output-dir",
+                    directory,
+                    "--policy-base-url",
+                    "http://policy/v1",
+                    "--policy-model",
+                    "policy",
+                    "--simulator-model",
+                    "simulator",
+                    "--skip-judge",
+                    "--retriever-backend",
+                    "new-retrive",
+                    "--new-retrive-module",
+                    str(module_path),
+                    "--elasticsearch-index",
+                    "custom-index",
+                    "--top-k",
+                    "5",
+                ]
+            )
+            retriever = _load_retriever(args)
+            results = retriever.search("question")
+
+        self.assertEqual(results[0]["case_name"], "question")
+        self.assertEqual(results[0]["text"], "custom-index")
+        self.assertEqual(results[0]["score"], 5)
+        retrieval = _run_config(args)["retrieval"]
+        self.assertEqual(retrieval["backend"], "new-retrive")
+        self.assertEqual(retrieval["new_retrive_module"], str(module_path.resolve()))
 
     def test_online_success_top_k_must_fit_retrieval_depth(self) -> None:
         with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):

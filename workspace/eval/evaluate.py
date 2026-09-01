@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import sys
@@ -17,6 +18,7 @@ from clarq_eval.metrics import summarize_results
 from clarq_eval.models import EvaluationSample, load_case_documents, load_samples
 from clarq_eval.random_user_simulator import RandomUserSimulator, RandomUserSimulatorConfig
 from clarq_eval.reporting import append_jsonl, read_jsonl, write_json, write_report
+from clarq_eval.retrievers import NewRetrieveCaseAdapter
 from clarq_eval.runner import EvaluationRunner
 
 
@@ -25,6 +27,7 @@ WORKSPACE_DIR = EVAL_DIR.parent
 DEFAULT_TEST_ROOT = WORKSPACE_DIR / "ClarQ" / "profile_split" / "test"
 DEFAULT_CASE_DOCUMENT = WORKSPACE_DIR / "ClarQ" / "case_answers_with_title.json"
 DEFAULT_VERL_ROOT = WORKSPACE_DIR / "verl_dial-main-h800"
+DEFAULT_NEW_RETRIVE_MODULE = WORKSPACE_DIR.parent / "new_retrive.py"
 OUTPUT_FILENAMES = (
     "trajectories.jsonl",
     "errors.jsonl",
@@ -249,6 +252,21 @@ def build_parser() -> argparse.ArgumentParser:
         "--search-server-host",
         default=_env("SEARCH_SERVER_HOST", _env("ELASTICSEARCH_URL", "http://127.0.0.1:9200")),
     )
+    parser.add_argument(
+        "--retriever-backend",
+        choices=("case-retriever", "new-retrive"),
+        default=_env("EVAL_RETRIEVER_BACKEND", "case-retriever"),
+        help=(
+            "Retrieval backend: case-retriever uses the training CaseRetriever; "
+            "new-retrive calls huawei_dial/new_retrive.py:retrieve_case."
+        ),
+    )
+    parser.add_argument(
+        "--new-retrive-module",
+        type=Path,
+        default=Path(_env("NEW_RETRIVE_MODULE_PATH", str(DEFAULT_NEW_RETRIVE_MODULE))),
+        help="Python module exporting retrieve_case(query, top_k, index) for --retriever-backend new-retrive.",
+    )
     parser.add_argument("--search-strategy", default=_env("SEARCH_SERVER_STRATEGY", "hybrid"))
     parser.add_argument("--elasticsearch-index", default=_env("ELASTICSEARCH_INDEX", "clarq_cases"))
     parser.add_argument("--elasticsearch-api-key", default=_env("ELASTICSEARCH_API_KEY", ""))
@@ -373,6 +391,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     args.test_root = args.test_root.resolve()
     args.case_document = args.case_document.resolve()
     args.verl_root = args.verl_root.resolve()
+    args.new_retrive_module = args.new_retrive_module.resolve()
     args.output_dir = args.output_dir.resolve()
     return args
 
@@ -404,6 +423,33 @@ def retriever_config(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def _load_retriever(args: argparse.Namespace) -> Any:
+    if args.retriever_backend == "new-retrive":
+        source = args.new_retrive_module
+        if not source.is_file():
+            raise FileNotFoundError(f"New retrieval module not found: {source}")
+        source_parent = str(source.parent)
+        if source_parent not in sys.path:
+            sys.path.insert(0, source_parent)
+        spec = importlib.util.spec_from_file_location("clarq_new_retrive", source)
+        if spec is None or spec.loader is None:
+            raise RuntimeError(f"Unable to load new retrieval module: {source}")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        try:
+            spec.loader.exec_module(module)
+        except Exception as error:
+            raise RuntimeError(
+                f"Failed to import new retrieval module {source}: {type(error).__name__}: {error}"
+            ) from error
+        retrieve_case = getattr(module, "retrieve_case", None)
+        if not callable(retrieve_case):
+            raise RuntimeError(f"New retrieval module must export callable retrieve_case: {source}")
+        return NewRetrieveCaseAdapter(
+            retrieve_case,
+            default_top_k=args.top_k,
+            index=args.elasticsearch_index,
+        )
+
     if not (args.verl_root / "examples" / "clarq_grpo" / "retriever.py").is_file():
         raise FileNotFoundError(f"ClarQ retriever not found under {args.verl_root}")
     root = str(args.verl_root)
@@ -580,6 +626,10 @@ def _run_config(args: argparse.Namespace) -> dict[str, Any]:
             },
         },
         "retrieval": {
+            "backend": args.retriever_backend,
+            "new_retrive_module": (
+                str(args.new_retrive_module) if args.retriever_backend == "new-retrive" else None
+            ),
             "search_server_host": _redact_url(args.search_server_host),
             "search_strategy": args.search_strategy,
             "index": args.elasticsearch_index,
@@ -602,12 +652,17 @@ def _run_config(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def _resume_signature(config: dict[str, Any]) -> dict[str, Any]:
+    retrieval = dict(config.get("retrieval") or {})
+    # Older CaseRetriever-only runs did not record a backend. Treat them as
+    # the current default so their checkpoint directories remain resumable.
+    retrieval.setdefault("backend", "case-retriever")
+    retrieval.setdefault("new_retrive_module", None)
     return {
         "schema_version": config.get("schema_version"),
         "data": config.get("data"),
         "trajectory": config.get("trajectory"),
         "services": config.get("services"),
-        "retrieval": config.get("retrieval"),
+        "retrieval": retrieval,
         "success_metric": {
             "success_top_k": config.get("metrics", {}).get("success_top_k"),
             "success_definition": config.get("metrics", {}).get("success_definition"),

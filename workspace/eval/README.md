@@ -7,8 +7,9 @@
 
 每个测试样本先用原始问题执行一次 baseline 检索，再让策略模型在
 `clarify_user`、`search_case` 和 `Complete` 之间决策。追问由训练时同款 Qwen3-32B
-模拟用户回答，搜索直接复用
-`workspace/verl_dial-main-h800/examples/clarq_grpo/retriever.py` 的 `CaseRetriever`。
+模拟用户回答。默认搜索直接复用
+`workspace/verl_dial-main-h800/examples/clarq_grpo/retriever.py` 的 `CaseRetriever`；也可配置为
+调用 `huawei_dial/new_retrive.py` 的 `retrieve_case` 接口。
 轨迹结束后，先检查最后一次 Agent 检索的可配置 Top-K 是否命中标准案例 title（默认 Top-3）。
 命中则直接成功；未命中时，独立 Success Judge 会比较原始问题、标准案例的 title/content 和
 最终 Top-K 案例的 title/content，判断这些召回案例能否回答原始问题。没有得到非空的 Agent
@@ -45,7 +46,8 @@ cp workspace/eval/config.example.env workspace/eval/.env
 - Qwen3-32B 用户模拟器服务，用于回答追问；
 - 必需的 Success Judge 服务。可通过 `SUCCESS_JUDGE_*` 单独配置；未配置时依次复用
   `JUDGE_*`、用户模拟器服务；
-- Elasticsearch 与 embedding 服务；
+- 使用默认 `case-retriever` 时需要 Elasticsearch 与 embedding 服务；
+- 使用 `new-retrive` 时需要该接口自身依赖的服务；评测只传入 `query`、`top_k` 和 `index`。
 - 可选的独立轨迹质量 Judge。未配置时默认复用用户模拟器，使用 `--skip-judge` 可关闭；
   该参数不会关闭正式 Success Judge。
 
@@ -115,6 +117,29 @@ workspace/eval/run_evaluation.sh \
   --success-top-k 3 \
   --output-dir workspace/eval/outputs/smoke
 ```
+
+### 选择检索后端
+
+默认 `case-retriever` 是训练同款的 Elasticsearch BM25 + 向量混合检索。要改用
+`huawei_dial/new_retrive.py` 中的 `retrieve_case`，传入：
+
+```bash
+workspace/eval/run_evaluation.sh \
+  --retriever-backend new-retrive \
+  --elasticsearch-index document_12 \
+  --output-dir workspace/eval/outputs/new-retrive-smoke
+```
+
+评测会对每次 baseline 和每次实际 `search_case` 调用
+`retrieve_case(query=<query>, top_k=<评测的 --top-k>, index=<--elasticsearch-index>)`；不会传入
+`strategy`、`use_similar_question`、`use_chat` 或 `chat_content`，因此这些参数维持接口自己的默认值。
+默认模块路径是 `huawei_dial/new_retrive.py`。模块不在该位置时可用
+`--new-retrive-module /path/to/new_retrive.py`，或设置 `NEW_RETRIVE_MODULE_PATH`。该模块必须导出
+可调用的 `retrieve_case`，并返回案例字典列表；返回字段沿用 `caseID`、`case_name`、`text`、`score`。
+所选 index 的案例 ID 与标题还必须和 `--case-document` 对齐，否则正式 Recall、MRR 和 Success
+指标无法将召回结果正确匹配到测试集标准案例。
+
+选定的后端、模块路径和索引会写入 `run_config.json`，因此续跑同一输出目录时也必须使用相同检索配置。
 
 确认后运行完整测试集：
 
