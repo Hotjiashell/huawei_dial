@@ -449,7 +449,7 @@ class ModelAndReportingTests(unittest.TestCase):
         self.assertEqual(args.model_mode, "qwen3_5")
         self.assertEqual(args.policy_model_mode, "qwen3_5")
         self.assertEqual(args.random_user_simulator_seed, 99)
-        self.assertTrue(args.random_user_proactive_known_on_unknown)
+        self.assertFalse(args.random_user_proactive_known_on_unknown)
         simulation = _run_config(args)["services"]["user_simulator"]
         self.assertEqual(simulation["mode"], "random")
         self.assertEqual(simulation["model_mode"], "qwen3_5")
@@ -463,7 +463,7 @@ class ModelAndReportingTests(unittest.TestCase):
                 "seed": 99,
                 "rephrase_question_probability": 0.16,
                 "compress_known_info_probability": 0.79,
-                "enable_proactive_known_info_on_unknown": True,
+                "enable_proactive_known_info_on_unknown": False,
                 "proactive_known_info_probability": 0.47,
             },
         )

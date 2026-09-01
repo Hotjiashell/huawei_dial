@@ -209,7 +209,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--random-user-proactive-known-on-unknown",
         action=argparse.BooleanOptionalAction,
-        default=_env_bool("EVAL_RANDOM_USER_PROACTIVE_KNOWN_ON_UNKNOWN", True),
+        default=_env_bool("EVAL_RANDOM_USER_PROACTIVE_KNOWN_ON_UNKNOWN", False),
         help="Allow unknown answers to volunteer one randomly selected known fact.",
     )
     parser.add_argument(

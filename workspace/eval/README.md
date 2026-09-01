@@ -156,8 +156,8 @@ workspace/eval/run_evaluation.sh \
 - 16%：不回答 Agent 的追问，只用短句改述原始用户问题；
 - 其余情况先由训练同款受约束选择器判断该追问是否存在直接对应的 `known_info`；
 - 若存在对应事实，79% 的概率额外调用一次模型，把这条 `known_info` 压缩成回答追问的短句；
-- 若不存在对应事实，且启用主动反馈选项，47% 的概率额外调用一次模型，从所有 `known_info`
-  中随机选一条主动反馈；否则返回 `I don't know.`。
+- 若不存在对应事实，默认返回 `I don't know.`。显式启用主动反馈选项后，才有 47% 的概率
+  额外调用一次模型，从所有 `known_info` 中随机选一条主动反馈。
 
 选项 `--random-user-rephrase-probability`、`--random-user-compress-known-probability`、
 `--random-user-proactive-known-probability` 和
@@ -165,6 +165,10 @@ workspace/eval/run_evaluation.sh \
 `trajectories.jsonl` 记录 `user_simulator_behavior`；压缩回答和主动反馈仍标记为
 `known_info`，因此不会被误计为未知回答。上述命令行参数也可通过 `config.example.env` 中的
 `EVAL_RANDOM_USER_*` 环境变量设置。
+
+默认配置关闭主动反馈。需要启用时传入
+`--random-user-proactive-known-on-unknown`，或设置
+`EVAL_RANDOM_USER_PROACTIVE_KNOWN_ON_UNKNOWN=true`。
 
 ## 断点续跑与离线重算
 
